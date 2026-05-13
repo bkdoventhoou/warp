@@ -100,6 +100,26 @@ This setting cannot be used during graph capture
 Note: Enabling this flag impacts performance
 """
 
+verify_launch_array_access: bool = False
+"""Enable kernel launch argument accessibility checking.
+
+When enabled, Warp checks whether ``warp.array`` arguments are accessible from
+the launch device before passing their pointers to the kernel. This check uses
+the array's allocation type where Warp can determine it. For cross-device
+``warp.array`` arguments whose allocation cannot be verified, Warp fails closed
+and raises an error instead of assuming the launch is safe. This includes
+arrays backed by custom or externally wrapped allocators whose allocation kind is
+not exposed to Warp. Directly passed ``__array_interface__`` and
+``__cuda_array_interface__`` objects are converted at launch time and are not
+fully allocation-verified by this setting.
+
+Unlike ``verify_cuda``, this setting can be used during CUDA graph capture
+because checks run before each launch is recorded. For cross-GPU graph capture,
+enable peer or memory-pool access with Warp APIs before capture begins.
+
+Note: Enabling this flag impacts performance.
+"""
+
 print_launches: bool = False
 """Enable detailed kernel launch logging.
 

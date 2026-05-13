@@ -212,6 +212,32 @@ Custom allocators bypass those, so allocations made via `set_cuda_allocator` /
 introduce a richer allocator protocol that lets custom allocators participate in
 tracking without leaking framework internals into the allocator surface.
 
+#### Launch Verification Interaction
+
+`warp.config.verify_launch_array_access` remains conservative for arrays allocated
+through custom allocators. Same-device launches are accepted, but cross-device
+launches require Warp to know whether the allocation uses default CUDA memory,
+CUDA memory pools, pinned host memory, managed memory, or another memory type.
+The current custom allocator protocol only returns a pointer, so Warp cannot
+choose the correct access predicate for those allocations. In verification mode,
+cross-device arrays backed by custom or externally wrapped allocators therefore
+fail closed unless a future allocator protocol exposes allocation-kind metadata.
+Disabling the diagnostic leaves access legality to the hardware, matching the
+normal launch path.
+
+A future allocator protocol extension should let allocators describe allocations
+they returned without exposing framework-specific internals. The minimal shape is
+an optional query, for example `describe_allocation(ptr) -> AllocationInfo | None`,
+where `AllocationInfo` identifies the owning device and allocation kind (`default`
+CUDA device memory, CUDA memory pool, managed memory, pinned host memory, or an
+allocator-defined external kind). `verify_launch_array_access` can then reuse the
+same access predicates it uses for Warp-owned allocations: peer access for default
+CUDA memory, memory-pool access for CUDA pool allocations, coherent CPU/GPU
+capability checks for host allocations, and conservative rejection when the
+allocator returns `None` or an unknown kind. This keeps the basic allocator
+surface small while giving advanced allocators a path to participate in launch
+verification.
+
 #### Built-in RMM Adapter
 
 New module `warp/_src/rmm_allocator.py`:

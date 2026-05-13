@@ -52,10 +52,16 @@ def test_devices_can_access_self(test, device):
     for warp_device in wp.get_devices():
         device_str = str(warp_device)
 
-        if (device.is_cpu and warp_device.is_cuda) or (device.is_cuda and warp_device.is_cpu):
+        if device.is_cuda and warp_device.is_cpu:
+            test.assertEqual(device.can_access(warp_device), device.is_cpu_memory_access_from_gpu_supported)
+            test.assertNotEqual(device, warp_device)
+            test.assertNotEqual(device, device_str)
+        elif device.is_cpu and warp_device.is_cuda:
             test.assertFalse(device.can_access(warp_device))
             test.assertNotEqual(device, warp_device)
             test.assertNotEqual(device, device_str)
+        elif device.is_cuda and warp_device.is_cuda and device != warp_device:
+            test.assertEqual(device.can_access(warp_device), wp.is_peer_access_enabled(warp_device, device))
 
 
 def test_devices_sm_count(test, device):

@@ -47,4 +47,5 @@ API
    verify_autograd_array_access
    verify_cuda
    verify_fp
+   verify_launch_array_access
    version
