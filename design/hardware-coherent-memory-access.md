@@ -16,9 +16,9 @@ if value.device != device:
     )
 ```
 
-This restriction is correct on discrete-GPU systems (e.g., a workstation with a PCIe-connected NVIDIA GPU) where the GPU genuinely cannot dereference a pointer to unpinned CPU memory. However, a growing class of NVIDIA hardware uses **unified memory architectures** where the GPU _can_ directly access CPU memory, and on some systems the CPU can also directly access GPU-resident CUDA managed memory:
+This restriction is correct on discrete-GPU systems (e.g., a workstation with a PCIe-connected NVIDIA GPU) where the GPU genuinely cannot dereference a pointer to unpinned CPU memory. However, a growing class of NVIDIA hardware uses **unified memory architectures** where the GPU _can_ directly access CPU memory. Some systems also let the CPU directly access GPU-resident CUDA managed memory, but that is a separate CUDA-reported capability and must not be inferred from ATS alone:
 
-- **Grace C2C systems (GH200, GB200, DGX Spark)** -- Grace ARM CPU + Hopper or Blackwell GPU connected via NVLink Chip-to-Chip (C2C). These systems provide bidirectional ATS: the GPU can access all system memory, and the CPU can directly access CUDA managed memory resident on the GPU without migration.
+- **Grace C2C systems (GH200, GB200, DGX Spark)** -- Grace ARM CPU + Hopper or Blackwell GPU connected via NVLink Chip-to-Chip (C2C). These systems can report host-page-table ATS, allowing the GPU to access ordinary system memory. CPU direct access to GPU-resident CUDA managed memory depends on `cudaDevAttrDirectManagedMemAccessFromHost`; do not assume it from the product family name.
 - **Jetson Orin and other limited Tegra systems** -- Integrated GPUs sharing the same DRAM as the CPU, but with a limited unified memory model where ordinary system allocations are not necessarily GPU-accessible.
 - **Jetson Thor** -- Tegra Blackwell SoC with CUDA-reported ATS. On a Thor development kit tested with CUDA 13.0, the GPU can directly access ordinary system allocations (`malloc`, anonymous `mmap`, and file-backed `mmap`) and host-native atomics work, but CPU direct access to `cudaMalloc` memory is still not supported.
 - **HMM-capable discrete systems** -- Linux kernel 6.1.24+ with Heterogeneous Memory Management (HMM) enabled allows software-coherent access to all system memory from PCIe GPUs, without requiring explicit CUDA allocation APIs.
@@ -86,7 +86,7 @@ Characteristics:
 - Migration happens via page faults at page granularity (software coherence).
 - Oversubscription is allowed.
 - `cudaMallocManaged` still works but is unnecessary for basic access -- `malloc` suffices.
-- GPU `cudaMalloc` allocations are NOT CPU-accessible (unlike bidirectional ATS).
+- GPU `cudaMalloc` allocations are NOT CPU-accessible.
 
 ### Paradigm 4: Full System-Memory Access with Host Page Tables (ATS)
 
@@ -96,7 +96,7 @@ Available on Grace Hopper, Grace Blackwell (including DGX Spark), Jetson Thor, a
 
 Characteristics:
 - ALL system-allocated memory is GPU-accessible (same as HMM).
-- GPU-resident CUDA managed memory is CPU-accessible without migration only when `cudaDevAttrDirectManagedMemAccessFromHost == 1`. This is true on Grace Hopper / Grace Blackwell systems, but false on Jetson Thor as tested with CUDA 13.0.
+- GPU-resident CUDA managed memory is CPU-accessible without migration only when `cudaDevAttrDirectManagedMemAccessFromHost == 1`. This attribute is independent of ATS and must be queried directly. It is false on Jetson Thor as tested with CUDA 13.0, and false on a DGX Spark / GB10 system tested with CUDA Toolkit 13.0 and driver 580.95.05.
 - Native CPU-GPU atomics work when `cudaDevAttrHostNativeAtomicSupported == 1`. This is a separate capability bit and does not imply CPU access to `cudaMalloc` allocations.
 - Host page tables are used for system-memory access. On systems with distinct CPU and GPU memory pools (Grace Hopper / Grace Blackwell), physical placement still matters for performance. On integrated SoCs such as Jetson Thor, the CPU and GPU share a single DRAM pool.
 - ATS subsumes the system-memory access capabilities of HMM. When ATS is available, HMM is automatically disabled.
@@ -115,13 +115,36 @@ The previous version of this document speculated that Jetson Thor would follow t
 
 The implementation must therefore treat "GPU can access system memory", "CPU can access GPU-resident CUDA managed memory", and "native CPU-GPU atomics work" as three independent capabilities.
 
+#### Observed DGX Spark / GB10 Behavior
+
+Testing on a DGX Spark-class GB10 system on 2026-05-14 showed that ATS and C2C
+do not imply CPU direct access to GPU-resident CUDA managed memory:
+
+- Platform: CUDA Toolkit 13.0, Driver 580.95.05, GPU `NVIDIA GB10`, `sm_121`.
+- `nvidia-smi -q` reports `Addressing Mode: ATS` and `GPU C2C Mode: Enabled`.
+- CUDA attributes queried directly through the CUDA driver:
+  `managedMemory == 1`, `concurrentManagedAccess == 1`,
+  `pageableMemoryAccess == 1`, `pageableMemoryAccessUsesHostPageTables == 1`,
+  `directManagedMemAccessFromHost == 0`, and
+  `hostNativeAtomicSupported == 1`.
+- Warp reports the corresponding Python properties as
+  `is_cpu_memory_access_from_gpu_supported == True`,
+  `is_gpu_memory_access_from_cpu_supported == False`, and
+  `is_cpu_gpu_atomic_supported == True`.
+
+This corrects the earlier assumption that DGX Spark / Grace Blackwell systems
+should be classified as "bidirectional ATS" for managed-memory host access.
+For Phase 1, the relevant launch feature remains GPU access to CPU arrays via
+`pageableMemoryAccess`; CPU direct access to GPU-resident managed memory remains
+attribute-gated and is not used to validate Warp default CUDA arrays.
+
 ### Summary of Access Rules by Paradigm
 
-| Allocation type | Limited (Tegra/Win) | Full Managed Only | HMM (Software) | ATS system-memory only (Thor) | ATS bidirectional (Grace/GB) |
+| Allocation type | Limited (Tegra/Win) | Full Managed Only | HMM (Software) | ATS system-memory only (Thor/GB10 observed) | ATS with direct managed host access |
 |---|---|---|---|---|---|
 | `malloc` / system | CPU only | CPU only | CPU + GPU | CPU + GPU | CPU + GPU |
 | `mmap` / file-backed | CPU only | CPU only | CPU + GPU | CPU + GPU | CPU + GPU |
-| `cudaMallocManaged` | Limited shared | Full shared | Full shared | Full shared | Full shared |
+| `cudaMallocManaged` | Limited shared | Full shared | Full shared | Full shared; no direct host access to GPU-resident pages unless attribute reports it | Full shared with direct host access to GPU-resident pages |
 | `cudaMallocHost` (pinned) | CPU + GPU (zero-copy) | CPU + GPU | CPU + GPU | CPU + GPU | CPU + GPU |
 | `cudaHostRegister` | Device-dependent | CPU + GPU | CPU + GPU | CPU + GPU | CPU + GPU |
 | `cudaMalloc` | GPU only | GPU only | GPU only | GPU only | GPU only for Warp default arrays |
@@ -141,25 +164,25 @@ Even when all system memory is GPU-accessible on ATS systems, physical placement
 
 On integrated ATS systems such as Jetson Thor, CPU and GPU memory share one DRAM pool, so prefetch may still succeed but may not provide a useful "closer" placement. Automatic prefetch should therefore remain disabled on integrated GPUs.
 
-**Important performance caveat**: On bidirectional ATS systems, the CUDA documentation warns against frequent CPU writes to GPU-resident memory. ARM (Grace) caches require all memory operations to pass through the cache hierarchy, so writing to GPU-resident memory causes cache misses that pull data across C2C before writing. The recommended pattern is: write to CPU-resident memory, let the GPU read it remotely or prefetch it.
+**Important performance caveat**: On host-page-table ATS systems with distinct CPU and GPU memory pools, CPU writes to GPU-resident memory may be expensive even if a future platform reports direct managed-memory host access. ARM (Grace) caches require all memory operations to pass through the cache hierarchy, so writing to GPU-resident memory can cause cache misses that pull data across C2C before writing. The recommended pattern is: write to CPU-resident memory, let the GPU read it remotely or prefetch it.
 
-### Comparison: DGX Spark vs. Jetson Thor
+### Comparison: DGX Spark / GB10 vs. Jetson Thor
 
-Both DGX Spark and Jetson Thor use Blackwell GPUs, but their memory architectures differ fundamentally:
+Both DGX Spark / GB10 and Jetson Thor use Blackwell-generation GPUs, but their memory architectures differ and the CUDA attributes must still be queried independently:
 
-| Aspect | DGX Spark (Grace Blackwell) | Jetson Thor (Tegra Blackwell) |
+| Aspect | DGX Spark / GB10 (observed) | Jetson Thor (Tegra Blackwell) |
 |---|---|---|
 | CPU-GPU interconnect | NVLink C2C (high bandwidth, coherent) | On-chip SoC fabric |
 | ATS available | Yes | Yes (`nvidia-smi` reports ATS) |
 | Coherency model | Host-page-table ATS with distinct CPU/GPU memory pools | Host-page-table ATS for system memory on an integrated SoC |
 | `malloc` GPU-accessible | Yes | Yes |
-| `cudaMalloc` CPU-accessible | Yes | No |
+| CPU direct access to GPU-resident CUDA managed memory | No (`directManagedMemAccessFromHost == 0` on CUDA 13.0 / driver 580.95.05) | No (`directManagedMemAccessFromHost == 0` on CUDA 13.0) |
 | Native CPU-GPU atomics | Yes | Yes for host-visible memory |
 | Memory topology | Grace LPDDR5X + Blackwell HBM (NUMA) | Single shared DRAM pool |
-| Unified memory paradigm | ATS bidirectional (Paradigm 4) | ATS system-memory only (Paradigm 4) |
+| Unified memory paradigm | ATS system-memory access (Paradigm 4) | ATS system-memory access (Paradigm 4) |
 | Best default allocator | System allocator (`malloc`) for shared CPU/GPU data | System allocator (`malloc`) for CPU-produced GPU-readable data; `cudaMalloc` for GPU-private data |
 
-This means the implementation must query capabilities independently instead of assuming a single "ATS" behavior. Jetson Thor can launch GPU kernels directly over CPU arrays, but CPU kernels still cannot dereference `cudaMalloc` arrays.
+This means the implementation must query capabilities independently instead of assuming a single "ATS" behavior. DGX Spark / GB10 and Jetson Thor can launch GPU kernels directly over CPU arrays, but CPU kernels still cannot dereference Warp default CUDA arrays.
 
 ## Requirements
 
@@ -243,7 +266,7 @@ Three CUDA device attributes are needed:
 
 - **`CU_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST`** -- answers "can the CPU directly access CUDA managed memory resident on the GPU without migration?" This does not imply that Warp `wp.array(device="cuda:0")` allocations backed by `cuMemAlloc` via `CudaDefaultAllocator` can be passed to CPU kernels. Phase 1 exposes the capability as a device property, but `Device.can_access()` and `verify_launch_array_access` remain conservative for CPU-to-CUDA Warp arrays because Warp's built-in CUDA arrays are not CUDA managed-memory allocations.
 
-- **`CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED`** -- answers "do CPU-GPU atomics work natively across the interconnect?" On systems where this is true (Grace Hopper, Grace Blackwell, and Jetson Thor as tested), a GPU `atomicAdd` targeting a CPU-resident address produces correct results via hardware coherency. On HMM systems, the same operation can silently produce wrong results -- the GPU atomic hits a page backed by CPU physical memory without hardware coherency for atomic operations. Exposing this as a device property lets users and downstream tools (e.g., documentation, `wp.prefetch()` heuristics) reason about atomic safety. This attribute must be treated independently from `direct_managed_mem_access_from_host`.
+- **`CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED`** -- answers "do CPU-GPU atomics work natively across the interconnect?" On systems where this is true (DGX Spark / GB10 and Jetson Thor as tested), a GPU `atomicAdd` targeting a CPU-resident address produces correct results via hardware coherency. On HMM systems, the same operation can silently produce wrong results -- the GPU atomic hits a page backed by CPU physical memory without hardware coherency for atomic operations. Exposing this as a device property lets users and downstream tools (e.g., documentation, `wp.prefetch()` heuristics) reason about atomic safety. This attribute must be treated independently from `direct_managed_mem_access_from_host`.
 
 The first attribute is needed to gate the GPU-accessing-CPU branch in `can_access()` and launch verification. The second and third are exposed as queryable device properties for users who need to reason about managed-memory host access and cross-device atomic safety. `can_access()` and launch verification do not use `direct_managed_mem_access_from_host` for CPU-to-CUDA default arrays because those are not CUDA managed-memory allocations.
 
@@ -520,7 +543,7 @@ Add `docs/deep_dive/memory_access.rst` and link it from the docs index and devic
 
 Default mode (`verify_launch_array_access = False`): no Python-level checking. The hardware decides.
 
-| Launch device | Array device | Discrete GPU (no HMM) | HMM system | Jetson Thor | Bidirectional ATS (DGX Spark) |
+| Launch device | Array device | Discrete GPU (no HMM) | HMM system | Jetson Thor | Host-page-table ATS (DGX Spark / GB10 observed) |
 |---|---|---|---|---|---|
 | `cuda:0` | `cuda:0` | OK (same device) | OK | OK | OK |
 | `cuda:0` | `cpu` (pageable) | **CUDA fault** | **OK** (HMM) | **OK** (ATS system memory) | **OK** (ATS) |
@@ -530,7 +553,7 @@ Default mode (`verify_launch_array_access = False`): no Python-level checking. T
 
 Verification mode (`verify_launch_array_access = True`): each Warp-owned array argument is checked with allocation-aware launch verification where Warp can determine the allocator.
 
-| Launch device | Array device | Discrete GPU (no HMM) | HMM system | Jetson Thor | Bidirectional ATS (DGX Spark) |
+| Launch device | Array device | Discrete GPU (no HMM) | HMM system | Jetson Thor | Host-page-table ATS (DGX Spark / GB10 observed) |
 |---|---|---|---|---|---|
 | `cuda:0` | `cuda:0` | OK (same device) | OK | OK | OK |
 | `cuda:0` | `cpu` (pageable) | **RuntimeError** | **OK** (HMM) | **OK** (ATS system memory) | **OK** (ATS) |
@@ -699,7 +722,7 @@ def prefetch(
 #### Usage example
 
 ```python
-# On DGX Spark (bidirectional ATS system):
+# On DGX Spark / GB10 (host-page-table ATS system):
 data = wp.array(np.random.randn(1000000), dtype=wp.float32, device="cpu")
 
 # Prefetch to GPU before a compute-heavy kernel
@@ -913,20 +936,20 @@ Add a test module `warp/tests/cuda/test_unified_memory.py` (registered in `warp/
 
 ### CI considerations
 
-- The existing CI may not have Grace Hopper / Grace Blackwell / DGX Spark hardware. Tests that require specific paradigms should use `unittest.skipUnless` based on the device attributes queried in Phase 1.
+- The existing CI may not have HMM, ATS, Jetson Thor, or DGX Spark / GB10 hardware. Tests that require specific paradigms should use `unittest.skipUnless` based on the device attributes queried in Phase 1.
 - Tests that only query attributes (Phase 1 attribute and `can_access()` invariant tests) should run on all hardware.
 - Consider adding a CI label or tag for "unified memory" tests so they can be selectively run on appropriate hardware.
 
 ### Device compatibility matrix for test expectations
 
-| Test scenario | Discrete (no HMM) | Discrete (HMM) | Grace Hopper/Blackwell (bidirectional ATS) | Jetson Orin / limited Tegra | Jetson Thor |
-|---|---|---|---|---|---|
-| GPU can access CPU arrays | No | Yes | Yes | No | Yes |
-| CPU can access Warp default GPU arrays | No | No | No | No | No |
-| CPU can access GPU-resident CUDA managed memory | No | No | Yes | No | No |
-| Native CPU-GPU atomics on host-visible memory | No | No | Yes | Device-dependent | Yes |
-| Cross-device launch GPU->CPU array (default) | CUDA fault | OK | OK | CUDA fault | OK |
-| Cross-device launch CPU->GPU array (default) | Segfault | Segfault | Segfault for Warp default arrays | Segfault | Segfault |
-| Cross-device launch GPU->CPU array (verify mode) | RuntimeError | OK | OK | RuntimeError | OK |
-| Cross-device launch CPU->GPU array (verify mode) | RuntimeError | RuntimeError | RuntimeError for Warp default arrays | RuntimeError | RuntimeError |
-| `wp.prefetch()` for CPU arrays | No-op / warning | Yes (SW) | Yes (HW) | No-op / warning | Accepted; low expected benefit on integrated DRAM |
+| Test scenario | Discrete (no HMM) | Discrete (HMM) | Host-page-table ATS with direct managed host access | Jetson Orin / limited Tegra | Jetson Thor | DGX Spark / GB10 observed |
+|---|---|---|---|---|---|---|
+| GPU can access CPU arrays | No | Yes | Yes | No | Yes | Yes |
+| CPU can access Warp default GPU arrays | No | No | No | No | No | No |
+| CPU can access GPU-resident CUDA managed memory | No | No | Yes | No | No | No |
+| Native CPU-GPU atomics on host-visible memory | No | No | Yes | Device-dependent | Yes | Yes |
+| Cross-device launch GPU->CPU array (default) | CUDA fault | OK | OK | CUDA fault | OK | OK |
+| Cross-device launch CPU->GPU array (default) | Segfault | Segfault | Segfault for Warp default arrays | Segfault | Segfault | Segfault for Warp default arrays |
+| Cross-device launch GPU->CPU array (verify mode) | RuntimeError | OK | OK | RuntimeError | OK | OK |
+| Cross-device launch CPU->GPU array (verify mode) | RuntimeError | RuntimeError | RuntimeError for Warp default arrays | RuntimeError | RuntimeError | RuntimeError for Warp default arrays |
+| `wp.prefetch()` for CPU arrays | No-op / warning | Yes (SW) | Yes (HW) | No-op / warning | Accepted; low expected benefit on integrated DRAM | Yes (HW) |

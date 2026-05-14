@@ -1,22 +1,23 @@
-CPU/GPU Memory Access
-=====================
+CPU/GPU Cross-Device Memory Access
+==================================
 
 .. currentmodule:: warp
 
-Warp arrays are associated with a device such as ``"cpu"`` or ``"cuda:0"``.
-On many systems, an array can only be accessed by kernels launched on the same
-device.  Newer CPU/GPU systems can be more flexible: a GPU may be able to read
-ordinary CPU memory directly, and some systems can directly access CUDA managed
-memory resident on the GPU without an explicit copy.
+Warp arrays are associated with an allocation device such as ``"cpu"`` or
+``"cuda:0"``, and kernels run on a launch device. The portable default is to
+launch kernels on the same device as their array arguments. On systems with
+hardware-supported CPU/GPU memory access, some cross-device patterns can also be
+valid: a GPU may be able to read or write ordinary CPU memory directly, and some
+systems can let CPU code directly access GPU-resident CUDA managed memory.
 
 This page describes how Warp exposes those hardware capabilities and how to use
-them when writing advanced code.
+them when writing mixed CPU/GPU code.
 
 
-The Basic Rule
---------------
+Same-Device Default
+-------------------
 
-The launch device determines where a kernel runs.  The array device describes
+The launch device determines where a kernel runs, and the array device describes
 where the array allocation lives:
 
 .. code:: python
@@ -27,7 +28,7 @@ where the array allocation lives:
     wp.launch(kernel, dim=cpu_array.size, inputs=[cpu_array], device="cpu")
     wp.launch(kernel, dim=gpu_array.size, inputs=[gpu_array], device="cuda:0")
 
-The same-device pattern works on all supported systems.  Passing an array from
+The same-device pattern works on all supported systems. Passing an array from
 one device to a kernel running on another device depends on the capabilities of
 the device that performs the access.
 
@@ -35,48 +36,33 @@ the device that performs the access.
 Capability Properties
 ---------------------
 
-Each :class:`Device` exposes three CPU/GPU memory access properties.  They are
-``False`` on CPU devices and meaningful on GPU devices:
+Each :class:`Device` exposes three CPU/GPU memory access properties:
+:attr:`Device.is_cpu_memory_access_from_gpu_supported <warp.Device.is_cpu_memory_access_from_gpu_supported>`,
+:attr:`Device.is_gpu_memory_access_from_cpu_supported <warp.Device.is_gpu_memory_access_from_cpu_supported>`,
+and :attr:`Device.is_cpu_gpu_atomic_supported <warp.Device.is_cpu_gpu_atomic_supported>`.
+See the :class:`Device` API reference for the exact attribute definitions. This
+deep dive focuses on how those capabilities affect cross-device launches,
+managed memory, atomics, and diagnostics.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 36 64
-
-   * - Property
-     - Meaning
-   * - ``device.is_cpu_memory_access_from_gpu_supported``
-     - GPU kernels launched on this device can directly access ordinary CPU
-       memory, including arrays allocated with ``device="cpu"``.
-   * - ``device.is_gpu_memory_access_from_cpu_supported``
-     - CPU code can directly access CUDA managed memory resident on this
-       device without migration. This does not imply that Warp's default CUDA
-       arrays are CPU-accessible.
-   * - ``device.is_cpu_gpu_atomic_supported``
-     - Native atomic operations between CPU and GPU memory are supported by the
-       hardware.
-
-The properties are directional.  A system can allow GPU access to CPU memory
-without allowing CPU access to GPU-resident managed memory.
+On CPU devices, these properties are always ``False``. On GPU devices, each
+property describes a specific access path or operation; support for one does not
+imply support for another. For example, a system can allow GPU access to CPU
+memory without allowing CPU access to GPU-resident managed memory.
 
 .. code:: python
 
     device = wp.get_device("cuda:0")
 
-    if device.is_cpu_memory_access_from_gpu_supported:
-        print("GPU kernels can access CPU arrays directly")
-
-    if device.is_gpu_memory_access_from_cpu_supported:
-        print("CPU code can access GPU-resident managed memory directly")
-
-    if device.is_cpu_gpu_atomic_supported:
-        print("CPU/GPU atomics are supported")
+    gpu_can_access_cpu = device.is_cpu_memory_access_from_gpu_supported
+    cpu_can_access_gpu_managed_memory = device.is_gpu_memory_access_from_cpu_supported
+    cpu_gpu_atomics_are_supported = device.is_cpu_gpu_atomic_supported
 
 
 Common Hardware Models
 ----------------------
 
 The exact values are reported by the CUDA driver and may vary by platform,
-driver, kernel, and GPU generation.  The following table summarizes the models
+driver, kernel, and GPU generation. The following table summarizes the models
 advanced users commonly need to reason about:
 
 .. list-table::
@@ -99,15 +85,22 @@ advanced users commonly need to reason about:
      - Yes
      - Platform-dependent for managed memory
      - Yes, when reported by the driver
-   * - Grace Hopper / Grace Blackwell-style coherent memory
+   * - Host-page-table ATS with distinct CPU/GPU memory pools
      - Yes
-     - Yes for managed memory
+     - Only when reported by the driver
      - Yes, when reported by the driver
 
-HMM stands for Heterogeneous Memory Management.  ATS stands for Address
-Translation Services.  Warp does not require users to classify the platform
-manually.  Query the :class:`Device` properties and branch on the behavior your
-program needs.
+HMM stands for Heterogeneous Memory Management; for background, see NVIDIA's
+`HMM overview <https://developer.nvidia.com/blog/simplifying-gpu-application-development-with-heterogeneous-memory-management/>`__.
+ATS stands for Address Translation Services. Warp does not require users to
+classify the platform manually. Query the :class:`Device` properties and branch
+on the behavior your program needs.
+
+Do not infer CPU access to GPU-resident CUDA managed memory from ATS, C2C, or a
+product family name. For example, a DGX Spark-class GB10 system can report ATS
+and GPU access to CPU memory while
+``device.is_gpu_memory_access_from_cpu_supported`` is ``False``. Query the
+property directly before CPU code reads or writes GPU-resident managed memory.
 
 
 Launching GPU Kernels With CPU Arrays
@@ -127,7 +120,7 @@ directly read or write a CPU array:
         a_gpu = a.to(device)
         wp.launch(kernel, dim=a_gpu.size, inputs=[a_gpu], device=device)
 
-This can avoid explicit copies on HMM and coherent CPU/GPU systems.  If the
+This can avoid explicit copies on HMM and coherent CPU/GPU systems. If the
 capability is false and the kernel actually dereferences the CPU pointer, CUDA
 will report a runtime error such as an illegal memory access.
 
@@ -143,9 +136,19 @@ CPU access to GPU-resident managed memory is a separate capability:
     if device.is_gpu_memory_access_from_cpu_supported:
         ...
 
-Warp's default CUDA arrays are device allocations, not CUDA managed-memory
-allocations.  For those arrays, use an explicit copy before CPU code reads or
-writes the data:
+.. important::
+
+   ``device.is_gpu_memory_access_from_cpu_supported`` reports a hardware
+   capability for CUDA managed memory. Warp exposes the property today, but
+   standard Warp CUDA arrays are not managed-memory allocations. Until Warp
+   provides managed-memory allocation APIs, copy CUDA arrays to ``"cpu"`` before
+   CPU code reads or writes them.
+
+CUDA arrays created by standard Warp array constructors, such as
+:func:`zeros`, :func:`empty`, and :func:`ones`, are not CUDA managed-memory
+allocations. This is true whether the array comes from Warp's :ref:`mempool
+allocator <mempool_allocators>` or the built-in default CUDA allocator. For
+those arrays, use an explicit copy before CPU code reads or writes the data:
 
 .. code:: python
 
@@ -153,15 +156,15 @@ writes the data:
     a_cpu = a.to("cpu")
     wp.launch(cpu_kernel, dim=a_cpu.size, inputs=[a_cpu], device="cpu")
 
-Do not infer CPU access to GPU-resident memory from GPU access to CPU memory.
-Some systems support the first direction but not the second.
+Do not assume that GPU access to CPU memory implies CPU access to GPU-resident
+memory. Some systems support the former but not the latter.
 
 
 Using ``Device.can_access()``
 ------------------------------
 
 The method :meth:`Device.can_access` answers whether code running on one device
-can access allocations associated with another device:
+can access standard Warp allocations associated with another device:
 
 .. code:: python
 
@@ -172,17 +175,23 @@ can access allocations associated with another device:
         ...
 
 For GPU kernels accessing CPU arrays, this method uses
-``is_cpu_memory_access_from_gpu_supported``.  For CPU code accessing CUDA arrays,
-it returns ``False`` for Warp's default CUDA allocations.  For GPU/GPU pairs, it
-reflects CUDA peer access state for default CUDA allocations.  Memory pool
-allocations have separate access controls described in :ref:`mempool_access`.
+``is_cpu_memory_access_from_gpu_supported`` because standard Warp CPU arrays use
+ordinary CPU memory. For CPU code accessing CUDA arrays, it returns ``False`` for
+Warp CUDA arrays because the built-in CUDA allocators do not create CUDA
+managed-memory allocations. For GPU/GPU pairs, it reflects CUDA peer access state
+for default CUDA allocations. See :ref:`mempool_access` for the distinction
+between peer access for default CUDA allocations and memory-pool access for
+mempool allocations.
 
-``Device.can_access()`` is a device-level query.  It does not inspect a specific
-array allocation, so it does not report pinned CPU arrays separately from
-ordinary CPU arrays.  Launch verification, described below, uses an internal
-array-aware check for ``warp.array`` arguments.  When a cross-device
-``warp.array`` uses an allocation whose accessibility Warp cannot verify, launch
-verification fails closed instead of assuming the pointer is safe to use.
+``Device.can_access()`` is a conservative device-level query, not a guarantee
+that every possible allocation for the other device is accessible. It does not
+inspect a specific array allocation, so it does not report pinned CPU arrays
+separately from ordinary CPU arrays, and it does not use
+``is_gpu_memory_access_from_cpu_supported`` to accept standard Warp CUDA arrays
+as CPU-accessible. Launch verification, described below, uses an internal
+array-aware check for Warp array arguments. When a cross-device Warp array uses
+an allocation whose accessibility Warp cannot verify, launch verification fails
+closed instead of assuming the pointer is safe to use.
 
 
 .. _launch_verification:
@@ -191,44 +200,46 @@ Launch Verification
 -------------------
 
 By default, Warp passes array pointers through to :func:`launch` without a
-pre-launch same-device check.  This keeps the launch path lightweight and allows
+pre-launch same-device check. This keeps the launch path lightweight and allows
 hardware-supported mixed CPU/GPU launches to work.
 
-If you want a clear Python error before the kernel runs, enable launch
-verification:
+If you want a clear Python error before the kernel runs, enable
+:attr:`warp.config.verify_launch_array_access`:
 
 .. code:: python
 
     wp.config.verify_launch_array_access = True
 
-When enabled, Warp checks each ``warp.array`` argument against the launch device
-before the pointer is passed to the kernel.  For CPU arrays passed to CUDA
+When enabled, Warp checks each Warp array argument against the launch device
+before the pointer is passed to the kernel. For CPU arrays passed to CUDA
 kernels, pinned CPU arrays are accepted on CUDA devices with unified virtual
 addressing, and ordinary CPU arrays require
-``is_cpu_memory_access_from_gpu_supported``.  For CUDA arrays, this check uses
+``is_cpu_memory_access_from_gpu_supported``. For CUDA arrays, this check uses
 the allocation type where Warp can determine it: default CUDA allocations use
 CUDA peer-access state, while memory pool allocations use memory-pool access
-state.  If the launch device cannot access the array allocation, or if Warp
-cannot verify a cross-device ``warp.array`` allocation, Warp raises a
-``RuntimeError`` identifying the offending argument.  This is useful when
+state. If the launch device cannot access the array allocation, or if Warp
+cannot verify a cross-device Warp array allocation, Warp raises a ``RuntimeError``
+identifying the offending argument. This is useful when
 debugging mixed-device launches on systems that do not support direct CPU/GPU
 memory access or on multi-GPU systems where peer and memory-pool access are
 configured separately.
 
 Arrays backed by custom or externally wrapped allocators are a limitation of this
-diagnostic.  Warp does not know the allocation kind for those arrays, so
-cross-device launches fail closed when ``verify_launch_array_access`` is enabled
-unless a future allocator protocol exposes enough allocation metadata to select
-the correct access predicate.
+diagnostic. Warp does not know the allocation kind for those arrays, so
+cross-device launches fail closed when
+:attr:`warp.config.verify_launch_array_access` is enabled unless a future
+allocator protocol exposes enough allocation metadata to select the correct
+access predicate.
 
 Directly passing an object that exposes ``__array_interface__`` or
-``__cuda_array_interface__`` is different from passing a ``warp.array``.  Those
+``__cuda_array_interface__`` is different from passing a Warp array. Those
 protocols let Warp construct the kernel argument at launch time, but they do not
 give Warp enough allocation information to perform the same allocation-aware
-accessibility check.  In this phase, ``verify_launch_array_access`` does not
-fully verify those directly passed interface objects.  Advanced users who know
-such an allocation is valid are responsible for ensuring that the launch device
-can legally access the pointer.
+accessibility check. In this phase,
+:attr:`warp.config.verify_launch_array_access` does not fully verify directly
+passed objects exposing these protocols. Advanced users who know such an
+allocation is valid are responsible for ensuring that the launch device can
+legally access the pointer.
 
 .. code:: python
 
@@ -236,22 +247,26 @@ can legally access the pointer.
         wp.config.verify_launch_array_access = True
         wp.launch(kernel, dim=a.size, inputs=[a])
 
-``verify_launch_array_access`` is a diagnostic option.  It adds launch overhead and should
-usually be left disabled in performance-sensitive code.
+:attr:`warp.config.verify_launch_array_access` is a diagnostic option. It adds
+launch overhead and should usually be left disabled in performance-sensitive
+code.
 
-Unlike ``wp.config.verify_cuda``, ``verify_launch_array_access`` can be used during CUDA
-graph capture because the checks run before each launch is recorded.  For
-cross-GPU graph capture, enable peer access or memory-pool access with Warp APIs
-before capture begins so verification can use the recorded access state during
-capture.
+Unlike :attr:`warp.config.verify_cuda`,
+:attr:`warp.config.verify_launch_array_access` can be used during CUDA graph
+capture because the checks run before each launch is recorded. For cross-GPU
+graph capture, enable peer access or memory-pool access with Warp APIs before
+capture begins so verification can use the recorded access state during capture.
+When a CUDA graph captures a launch with CPU array arguments, replay uses the
+same captured CPU pointers. If the arrays remain alive, CPU updates made between
+replays are visible to kernels on devices that can access CPU memory.
 
 
 Atomic Operations
 -----------------
 
-Direct loads and stores do not imply atomic safety.  Code that uses atomics
+Direct loads and stores do not imply atomic safety. Code that uses atomics
 between CPU and GPU memory should also check
-``device.is_cpu_gpu_atomic_supported``:
+:attr:`Device.is_cpu_gpu_atomic_supported <warp.Device.is_cpu_gpu_atomic_supported>`:
 
 .. code:: python
 
@@ -260,16 +275,65 @@ between CPU and GPU memory should also check
     if not device.is_cpu_gpu_atomic_supported:
         raise RuntimeError("This algorithm requires CPU/GPU atomic support")
 
-This property is independent from CPU access to GPU-resident managed memory.
-For example, a system may support native CPU/GPU atomics for CPU memory while
-still requiring explicit copies before CPU code can read or write default GPU
-allocations.
+:attr:`Device.is_cpu_gpu_atomic_supported <warp.Device.is_cpu_gpu_atomic_supported>`
+answers only the atomic-operation part of a shared-memory workflow. The memory
+must still be accessible from both processors, and the program must provide any
+required synchronization.
+
+For example, GPU atomics into a CPU allocation require both GPU access to CPU
+memory and CPU/GPU atomic support:
+
+.. code:: python
+
+    device = wp.get_device("cuda:0")
+    counters = wp.zeros(1, dtype=wp.int32, device="cpu")
+
+    if (
+        device.is_cpu_memory_access_from_gpu_supported
+        and device.is_cpu_gpu_atomic_supported
+    ):
+        wp.launch(update_counters, dim=n, inputs=[counters], device=device)
+        wp.synchronize_device(device)
+        print(counters.numpy()[0])
+
+The same requirements apply when CPU and GPU work overlap. If a CPU kernel and
+a GPU kernel both write the same shared allocation concurrently, all conflicting
+accesses must use atomic operations, and the device must report CPU/GPU atomic
+support. Atomicity prevents lost updates, but it does not provide a deterministic
+ordering for non-commutative operations or floating-point accumulation:
+
+.. code:: python
+
+    # Assume both kernels call wp.atomic_add(counters, 0, 1) once per thread.
+    counters = wp.zeros(1, dtype=wp.int32, device="cpu")
+
+    if (
+        device.is_cpu_memory_access_from_gpu_supported
+        and device.is_cpu_gpu_atomic_supported
+    ):
+        wp.launch(gpu_increment, dim=num_gpu_threads, inputs=[counters], device=device)
+        wp.launch(cpu_increment, dim=num_cpu_threads, inputs=[counters], device="cpu")
+
+        wp.synchronize_device(device)
+        assert counters.numpy()[0] == num_gpu_threads + num_cpu_threads
+
+If :attr:`Device.is_cpu_gpu_atomic_supported <warp.Device.is_cpu_gpu_atomic_supported>`
+is ``False``, do not rely on concurrent CPU/GPU atomics, even on systems where
+the GPU can directly load and store CPU memory.
+
+That does not make ordinary CUDA device allocations CPU-accessible. CPU code
+should still copy CUDA arrays before reading or writing them:
+
+.. code:: python
+
+    values = wp.zeros(1024, dtype=float, device=device)
+    values_cpu = values.to("cpu")
 
 
 Practical Guidance
 ------------------
 
-Use the same-device pattern unless you need zero-copy CPU/GPU sharing.  When you
+Use the same-device pattern unless you need zero-copy CPU/GPU sharing. When you
 do need zero-copy sharing, query the specific direction your algorithm requires:
 
 - GPU kernel reads or writes ordinary CPU arrays: check
@@ -277,15 +341,16 @@ do need zero-copy sharing, query the specific direction your algorithm requires:
 - GPU kernel reads or writes pinned CPU arrays: use ``pinned=True`` and check
   ``device.is_uva``.
 - CPU code reads or writes default GPU arrays: copy the data to ``"cpu"`` first.
-- CPU code accesses GPU-resident CUDA managed memory: check
+- CPU code accesses externally provided GPU-resident CUDA managed memory: check
   ``device.is_gpu_memory_access_from_cpu_supported``.
-- CPU and GPU both use atomics on shared memory: check
+- CPU and GPU both use atomics on shared memory: make sure the allocation is
+  accessible from both processors, and check
   ``device.is_cpu_gpu_atomic_supported``.
 - GPU kernels use arrays from another GPU: enable peer access for default CUDA
   allocations, or memory-pool access for CUDA memory-pool allocations.
 - Debugging mixed-device launch failures: temporarily set
-  ``wp.config.verify_launch_array_access = True``.
+  :attr:`warp.config.verify_launch_array_access` to ``True``.
 
-Prefer capability checks over platform-name checks.  They make code portable
+Prefer capability checks over platform-name checks. They make code portable
 across discrete GPUs, HMM-enabled systems, Jetson, Grace, and future coherent
 CPU/GPU platforms.

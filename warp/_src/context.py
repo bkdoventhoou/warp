@@ -3817,8 +3817,9 @@ class Device:
         is_cpu_memory_access_from_gpu_supported (bool): Indicates whether GPU kernels on this device can directly
             access CPU memory. ``False`` for CPU devices.
         is_gpu_memory_access_from_cpu_supported (bool): Indicates whether CPU code can directly access CUDA managed
-            memory physically resident on this device without migration. This does not imply that Warp's default
-            CUDA arrays are CPU-accessible. ``False`` for CPU devices.
+            memory physically resident on this device without migration. This does not imply that Warp arrays
+            allocated on CUDA devices are CPU-accessible: Warp's built-in CUDA allocators do not create CUDA
+            managed-memory allocations. ``False`` for CPU devices.
         is_cpu_gpu_atomic_supported (bool): Indicates whether native atomic operations between CPU and GPU memory
             are supported on this device. ``False`` for CPU devices.
         is_cubin_supported (bool): Indicates whether Warp's version of NVRTC can directly
@@ -4151,6 +4152,12 @@ class Device:
             self.runtime.core.wp_cuda_context_set_current(self.context)
 
     def can_access(self, other):
+        """Return whether this device can access standard Warp allocations on another device.
+
+        This is a conservative device-level query. It does not inspect a specific allocation, and returns ``False``
+        when only some non-default allocation kinds, such as CUDA managed memory, may be accessible.
+        """
+
         # TODO: this function should be redesigned in terms of (device, resource).
         # - a device can access any resource on the same device
         # - a CUDA device can access CPU memory when the device supports it
@@ -4165,7 +4172,7 @@ class Device:
             return self.is_cpu_memory_access_from_gpu_supported
 
         if self.is_cpu and other.is_cuda:
-            # Warp's default CUDA arrays are device allocations, not CUDA managed-memory allocations.
+            # Warp's built-in CUDA allocators do not create managed-memory allocations.
             return False
 
         if self.is_cuda and other.is_cuda:
