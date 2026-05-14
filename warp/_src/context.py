@@ -11887,6 +11887,9 @@ def print_diagnostics() -> dict:
                 "sm_count": cuda_device.sm_count,
                 "memory_gb": round(cuda_device.total_memory / (1024**3), 1),
                 "mempool_enabled": cuda_device.is_mempool_enabled if cuda_device.is_mempool_supported else False,
+                "is_cpu_memory_access_from_gpu_supported": cuda_device.is_cpu_memory_access_from_gpu_supported,
+                "is_gpu_memory_access_from_cpu_supported": cuda_device.is_gpu_memory_access_from_cpu_supported,
+                "is_cpu_gpu_atomic_supported": cuda_device.is_cpu_gpu_atomic_supported,
                 "pci_bus_id": cuda_device.pci_bus_id,
             }
         )
@@ -11961,6 +11964,9 @@ def print_diagnostics() -> dict:
             _field("SMs:", dev["sm_count"], indent=4)
             _field("PCI:", dev["pci_bus_id"], indent=4)
             _field("Mempool:", "enabled" if dev["mempool_enabled"] else "disabled", indent=4)
+            _field("GPU->CPU mem:", dev["is_cpu_memory_access_from_gpu_supported"], indent=4)
+            _field("CPU->GPU mem:", dev["is_gpu_memory_access_from_cpu_supported"], indent=4)
+            _field("CPU/GPU atomics:", dev["is_cpu_gpu_atomic_supported"], indent=4)
     lines.append("")
 
     print("\n".join(lines))
