@@ -153,15 +153,15 @@ def test_graph_memset(test, device):
     np.testing.assert_allclose(arr.numpy(), np.zeros(n))
 
 
-def test_graph_verify_launch_array_access_cuda_capture(test, device):
+def test_graph_launch_verification_mode_checked_cuda_capture(test, device):
     n = 64
     input_arr = wp.array(np.arange(n, dtype=np.float32), device=device)
     output_arr = wp.zeros(n, dtype=float, device=device)
 
     wp.load_module(device=device)
 
-    verify_launch_array_access_saved = wp.config.verify_launch_array_access
-    wp.config.verify_launch_array_access = True
+    launch_verification_mode_saved = wp.config.launch_verification_mode
+    wp.config.launch_verification_mode = wp.config.LaunchVerificationMode.CHECKED
     try:
         with wp.ScopedCapture(device=device, force_module_load=False) as capture:
             wp.launch(scale_kernel, dim=n, inputs=[input_arr, output_arr, 2.0], device=device)
@@ -169,14 +169,14 @@ def test_graph_verify_launch_array_access_cuda_capture(test, device):
         wp.capture_launch(capture.graph)
         np.testing.assert_allclose(output_arr.numpy(), np.arange(n, dtype=np.float32) * 2.0)
     finally:
-        wp.config.verify_launch_array_access = verify_launch_array_access_saved
+        wp.config.launch_verification_mode = launch_verification_mode_saved
 
 
 @unittest.skipUnless(
     get_cuda_device_pair_with_peer_access_support(graph_module_load_devices),
     "Requires devices with peer access and CUDA graph module-load support",
 )
-def test_graph_verify_launch_array_access_peer_access_cuda_capture(test, _):
+def test_graph_launch_verification_mode_checked_peer_access_cuda_capture(test, _):
     target_device, peer_device = get_cuda_device_pair_with_peer_access_support(graph_module_load_devices)
     n = 64
     with wp.ScopedMempool(target_device, False), wp.ScopedMempool(peer_device, False):
@@ -188,12 +188,12 @@ def test_graph_verify_launch_array_access_peer_access_cuda_capture(test, _):
     wp.load_module(device=peer_device)
 
     peer_access_saved = wp.is_peer_access_enabled(target_device, peer_device)
-    verify_launch_array_access_saved = wp.config.verify_launch_array_access
+    launch_verification_mode_saved = wp.config.launch_verification_mode
     try:
         wp.set_peer_access_enabled(target_device, peer_device, True)
         test.assertTrue(wp.is_peer_access_enabled(target_device, peer_device))
 
-        wp.config.verify_launch_array_access = True
+        wp.config.launch_verification_mode = wp.config.LaunchVerificationMode.CHECKED
         # The peer graph reads input_arr from target_device; wait for its H2D initialization.
         wp.synchronize_device(target_device)
         with wp.ScopedCapture(device=peer_device, force_module_load=False) as capture:
@@ -202,7 +202,7 @@ def test_graph_verify_launch_array_access_peer_access_cuda_capture(test, _):
         wp.capture_launch(capture.graph)
         np.testing.assert_allclose(output_arr.numpy(), np.arange(n, dtype=np.float32) * 2.0)
     finally:
-        wp.config.verify_launch_array_access = verify_launch_array_access_saved
+        wp.config.launch_verification_mode = launch_verification_mode_saved
         wp.set_peer_access_enabled(target_device, peer_device, peer_access_saved)
 
 
@@ -210,7 +210,7 @@ def test_graph_verify_launch_array_access_peer_access_cuda_capture(test, _):
     get_cuda_device_pair_with_mempool_access_support(graph_module_load_devices),
     "Requires devices with mempool access and CUDA graph module-load support",
 )
-def test_graph_verify_launch_array_access_mempool_access_cuda_capture(test, _):
+def test_graph_launch_verification_mode_checked_mempool_access_cuda_capture(test, _):
     target_device, peer_device = get_cuda_device_pair_with_mempool_access_support(graph_module_load_devices)
     n = 64
     with wp.ScopedMempool(target_device, True):
@@ -222,12 +222,12 @@ def test_graph_verify_launch_array_access_mempool_access_cuda_capture(test, _):
     wp.load_module(device=peer_device)
 
     mempool_access_saved = wp.is_mempool_access_enabled(target_device, peer_device)
-    verify_launch_array_access_saved = wp.config.verify_launch_array_access
+    launch_verification_mode_saved = wp.config.launch_verification_mode
     try:
         wp.set_mempool_access_enabled(target_device, peer_device, True)
         test.assertTrue(wp.is_mempool_access_enabled(target_device, peer_device))
 
-        wp.config.verify_launch_array_access = True
+        wp.config.launch_verification_mode = wp.config.LaunchVerificationMode.CHECKED
         # The peer graph reads input_arr from target_device; wait for its H2D initialization.
         wp.synchronize_device(target_device)
         with wp.ScopedCapture(device=peer_device, force_module_load=False) as capture:
@@ -236,7 +236,7 @@ def test_graph_verify_launch_array_access_mempool_access_cuda_capture(test, _):
         wp.capture_launch(capture.graph)
         np.testing.assert_allclose(output_arr.numpy(), np.arange(n, dtype=np.float32) * 2.0)
     finally:
-        wp.config.verify_launch_array_access = verify_launch_array_access_saved
+        wp.config.launch_verification_mode = launch_verification_mode_saved
         wp.set_mempool_access_enabled(target_device, peer_device, mempool_access_saved)
 
 
@@ -376,19 +376,19 @@ add_function_test(TestGraph, "test_graph_memcpy", test_graph_memcpy, devices=dev
 add_function_test(TestGraph, "test_graph_memset", test_graph_memset, devices=devices)
 add_function_test(
     TestGraph,
-    "test_graph_verify_launch_array_access_cuda_capture",
-    test_graph_verify_launch_array_access_cuda_capture,
+    "test_graph_launch_verification_mode_checked_cuda_capture",
+    test_graph_launch_verification_mode_checked_cuda_capture,
     devices=cuda_devices_with_cuda_graph_module_load,
 )
 add_function_test(
     TestGraph,
-    "test_graph_verify_launch_array_access_peer_access_cuda_capture",
-    test_graph_verify_launch_array_access_peer_access_cuda_capture,
+    "test_graph_launch_verification_mode_checked_peer_access_cuda_capture",
+    test_graph_launch_verification_mode_checked_peer_access_cuda_capture,
 )
 add_function_test(
     TestGraph,
-    "test_graph_verify_launch_array_access_mempool_access_cuda_capture",
-    test_graph_verify_launch_array_access_mempool_access_cuda_capture,
+    "test_graph_launch_verification_mode_checked_mempool_access_cuda_capture",
+    test_graph_launch_verification_mode_checked_mempool_access_cuda_capture,
 )
 add_function_test(
     TestGraph,
