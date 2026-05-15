@@ -75,6 +75,11 @@ class _ConfigModule(_types.ModuleType):
     def __setattr__(self, name, value):
         if name in ("verbose", "quiet"):
             _warn_deprecated_config_access(name)
+        if name == "launch_verification_mode" and not isinstance(value, LaunchVerificationMode):
+            raise ValueError(
+                "warp.config.launch_verification_mode must be a warp.config.LaunchVerificationMode value, "
+                f"got {value!r}"
+            )
         super().__setattr__(name, value)
 
 

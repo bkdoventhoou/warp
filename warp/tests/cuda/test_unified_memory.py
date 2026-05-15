@@ -74,8 +74,20 @@ def test_unified_memory_launch_verification_mode_config(test, device):
     test.assertEqual(int(wp.config.LaunchVerificationMode.RELAXED), 1)
     test.assertEqual(int(wp.config.LaunchVerificationMode.CHECKED), 2)
     test.assertIs(wp.config.launch_verification_mode, wp.config.LaunchVerificationMode.RELAXED)
-    old_config_name = "_".join(("verify", "launch", "array", "access"))
+    old_config_name = "verify_launch_" + "array_access"
     test.assertFalse(hasattr(wp.config, old_config_name))
+
+    old_value = wp.config.launch_verification_mode
+    try:
+        for mode in wp.config.LaunchVerificationMode:
+            wp.config.launch_verification_mode = mode
+            test.assertIs(wp.config.launch_verification_mode, mode)
+
+        for value in (False, True, 0, 1, 2, 999, "checked"):
+            with test.assertRaisesRegex(ValueError, "launch_verification_mode"):
+                wp.config.launch_verification_mode = value
+    finally:
+        wp.config.launch_verification_mode = old_value
 
 
 def test_unified_memory_can_access(test, device):
@@ -158,21 +170,6 @@ def test_unified_memory_strict_rejects_cuda_launch_with_pinned_cpu_array(test, d
     with launch_verification_mode(wp.config.LaunchVerificationMode.STRICT):
         with test.assertRaisesRegex(RuntimeError, "is on device=cpu"):
             wp.launch(read_cpu_write_gpu, dim=src.size, inputs=[src], outputs=[dst], device=device, record_cmd=True)
-
-
-def test_unified_memory_invalid_launch_verification_mode_rejected(test, device):
-    """Invalid launch verification mode values fail before packing a cross-device array."""
-
-    src = wp.array(np.arange(4, dtype=np.float32), dtype=wp.float32, device="cpu")
-    dst = wp.empty(4, dtype=wp.float32, device=device)
-
-    old_value = wp.config.launch_verification_mode
-    wp.config.launch_verification_mode = 999
-    try:
-        with test.assertRaisesRegex(ValueError, "launch_verification_mode"):
-            wp.launch(read_cpu_write_gpu, dim=src.size, inputs=[src], outputs=[dst], device=device, record_cmd=True)
-    finally:
-        wp.config.launch_verification_mode = old_value
 
 
 def test_unified_memory_cuda_launch_reads_cpu_array_when_supported(test, device):
@@ -458,12 +455,6 @@ add_function_test(
     TestUnifiedMemory,
     "test_unified_memory_strict_rejects_cuda_launch_with_pinned_cpu_array",
     test_unified_memory_strict_rejects_cuda_launch_with_pinned_cpu_array,
-    devices=cuda_devices,
-)
-add_function_test(
-    TestUnifiedMemory,
-    "test_unified_memory_invalid_launch_verification_mode_rejected",
-    test_unified_memory_invalid_launch_verification_mode_rejected,
     devices=cuda_devices,
 )
 add_function_test(
