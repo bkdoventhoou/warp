@@ -188,17 +188,19 @@ This means the implementation must query capabilities independently instead of a
 
 | ID  | Requirement | Priority | Notes |
 | --- | --- | --- | --- |
-| R1 | `wp.launch()` must remove the per-argument device check so cross-device array arguments are always passed through to the hardware | Must | Core behavior change, zero launch overhead |
-| R2 | Provide an opt-in verification mode (`warp.config.verify_launch_array_access`) that restores device-access checking with clear diagnostics | Must | Debuggability for users who hit CUDA illegal memory access errors; compatible with CUDA graph capture |
-| R3 | Provide `wp.prefetch()` API for explicit data migration hints | Should | Performance optimization for HMM / host-page-table ATS |
-| R4 | Optional automatic prefetch in `wp.launch()` for cross-device arrays on coherent systems | Could | Convenience, but needs careful defaults |
-| R5 | `wp.copy()` should skip staging buffers when direct access is available between devices | Could | Performance optimization, marked as TODO in current code |
+| R1 | `wp.launch()` must default to passing cross-device array arguments through to the hardware | Must | Exposed as `wp.config.launch_verification_mode = LaunchVerificationMode.RELAXED` |
+| R2 | Provide launch verification modes (`warp.config.launch_verification_mode`) for strict same-device checks and allocation-aware diagnostics | Must | Debuggability for users who hit CUDA illegal memory access errors; compatible with CUDA graph capture |
+| R3 | Provide `wp.can_access(device, array)` for allocation-aware array access checks | Must | Resource-oriented public API; Phase 1 supports Warp arrays only |
+| R4 | Provide `wp.prefetch()` API for explicit data migration hints | Should | Performance optimization for HMM / host-page-table ATS |
+| R5 | Optional automatic prefetch in `wp.launch()` for cross-device arrays on coherent systems | Could | Convenience, but needs careful defaults |
+| R6 | `wp.copy()` should skip staging buffers when direct access is available between devices | Could | Performance optimization, marked as TODO in current code |
 
 **Non-goals:**
 - Changing the default allocator strategy (e.g., using `cudaMallocManaged` by default on limited Tegra systems). Allocator selection is a separate concern.
-- Changing CUDA graph capture semantics. Phase 1 supports using `verify_launch_array_access` during graph capture, but does not add new cross-device synchronization, placement, or capture-time migration behavior beyond the same access checks used for ordinary launches.
+- Changing CUDA graph capture semantics. Phase 1 supports using `launch_verification_mode` during graph capture, but does not add new cross-device synchronization, placement, or capture-time migration behavior beyond the same access checks used for ordinary launches.
 - Automatically determining the optimal physical placement for every array. This is a performance tuning concern best left to the user via hints.
 - Proactively detecting and warning about cross-device launches at `wp.launch()` time. The hardware enforces access rules; the verification mode is available for diagnosis when needed.
+- Providing a top-level device-to-device access wrapper. `wp.can_access(device, resource)` is a resource-oriented API; `wp.can_access(device, device)` is not supported. Device-level/default-allocation checks remain available as `Device.can_access(other_device)`.
 
 ## Design
 
@@ -236,7 +238,7 @@ In CUDA 13.0 headers, `cuMemPrefetchAsync` is `#define`'d to `cuMemPrefetchAsync
 | Phase 2 (prefetch) | v1 API only | v2 API available | v2 API available |
 | Phase 3 (auto-prefetch) | Full support (uses Phase 2 API) | Full support | Full support |
 | Phase 4 (`wp.copy()` optimization) | Full support | Full support | Full support |
-| Phase 5 (public allocation-aware access API) | Full support | Full support | Full support |
+| Phase 5 (expanded resource and allocation metadata) | Full support | Full support | Full support |
 
 No phase requires a minimum toolkit version beyond CUDA 12.0. Degradation on older toolkits only affects which `cuMemPrefetchAsync` signature is available, which is handled transparently by the dynamic dispatch.
 
@@ -246,17 +248,17 @@ Each phase introduces only the device attributes, native functions, and Python A
 
 | Phase | What it delivers | Attributes introduced | Native functions introduced |
 |---|---|---|---|
-| 1 | Remove device check from `wp.launch()`, add verification mode, redesign `can_access()`, add allocation-aware launch verification for Warp-owned arrays | Native: `pageable_memory_access`, `direct_managed_mem_access_from_host`, `host_native_atomic_supported`; Python: `is_cpu_memory_access_from_gpu_supported`, `is_gpu_memory_access_from_cpu_supported`, `is_cpu_gpu_atomic_supported` | Three `wp_cuda_device_get_*` accessors |
+| 1 | Remove device check from `wp.launch()`, add verification mode, redesign `Device.can_access()`, add `wp.can_access(device, array)`, add allocation-aware launch verification for Warp-owned arrays | Native: `pageable_memory_access`, `direct_managed_mem_access_from_host`, `host_native_atomic_supported`; Python: `is_cpu_memory_access_from_gpu_supported`, `is_gpu_memory_access_from_cpu_supported`, `is_cpu_gpu_atomic_supported` | Three `wp_cuda_device_get_*` accessors |
 | 2 | `wp.prefetch()` for explicit data placement | `pageable_memory_access_uses_host_page_tables` (to distinguish HMM from host-page-table ATS for warning/no-op behavior) | `wp_cuda_mem_prefetch_async` |
 | 3 | Auto-prefetch in `wp.launch()` | `is_integrated` (to avoid pointless prefetches on shared-DRAM SoCs) | None |
 | 4 | `wp.copy()` staging-buffer optimization | None (reuses Phase 1 access predicates) | None |
-| 5 | Public allocation-aware access API and managed/pinned/custom allocation refinements | `concurrent_managed_access` (to distinguish limited vs. full managed memory) | None |
+| 5 | Expand `wp.can_access()` to additional resources and richer managed/custom allocation metadata | `concurrent_managed_access` (to distinguish limited vs. full managed memory) | None |
 
 ### Phase 1: Cross-Device Launch Support
 
-**Goal:** Remove the per-argument device check from `wp.launch()` so that cross-device array arguments are passed straight through to the hardware. On systems with unified system-memory access (HMM or host-page-table ATS), this means GPU kernels can directly consume CPU arrays with zero launch overhead and zero friction. On systems where the access is illegal, the CUDA runtime produces an error. A verification mode (`warp.config.verify_launch_array_access`) is available to diagnose such errors with clear, argument-level diagnostics before the kernel runs, including during CUDA graph capture.
+**Goal:** Replace the unconditional per-argument device check in `wp.launch()` with an explicit launch verification mode. The default `LaunchVerificationMode.RELAXED` passes cross-device array arguments straight through to the hardware. On systems with unified system-memory access (HMM or host-page-table ATS), this means GPU kernels can directly consume CPU arrays with zero launch overhead and zero friction. On systems where the access is illegal, the CUDA runtime or host process produces the error. `LaunchVerificationMode.STRICT` restores the original same-device rule, and `LaunchVerificationMode.CHECKED` provides allocation-aware diagnostics before the kernel runs, including during CUDA graph capture.
 
-This phase delivers five things: (a) query three new device attributes, (b) redesign `Device.can_access()` as a conservative device-level/default-allocation query, (c) remove the default `pack_arg()` same-device check, (d) add `warp.config.verify_launch_array_access` with allocation-aware verification for Warp-owned arrays where Warp can identify the allocator, including pinned CPU arrays on CUDA devices with UVA, and (e) add tests and advanced user documentation for the CPU/GPU memory access model.
+This phase delivers six things: (a) query three new device attributes, (b) redesign `Device.can_access()` as a conservative device-level/default-allocation query, (c) add `wp.can_access(device, array)` as a public allocation-aware resource query for Warp arrays, (d) replace the unconditional `pack_arg()` same-device check with an explicit launch verification policy, (e) add `warp.config.LaunchVerificationMode` and `warp.config.launch_verification_mode` with allocation-aware verification for Warp-owned arrays where Warp can identify the allocator, including pinned CPU arrays on CUDA devices with UVA, and (f) add tests and advanced user documentation for the CPU/GPU memory access model.
 
 #### 1a. Query Device Attributes
 
@@ -264,11 +266,11 @@ Three CUDA device attributes are needed:
 
 - **`CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS`** -- answers "can this GPU access ordinary `malloc`'d CPU memory?" This is the attribute that determines whether a Warp `wp.array(device="cpu")` (backed by `malloc` via `CpuDefaultAllocator`) can be dereferenced by a GPU kernel. Without it, we cannot distinguish a system where the GPU can read CPU pointers (HMM, host-page-table ATS, Jetson Thor) from one where it cannot (discrete GPU without HMM, limited Tegra, Windows).
 
-- **`CU_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST`** -- answers "can the CPU directly access CUDA managed memory resident on the GPU without migration?" This does not imply that Warp `wp.array(device="cuda:0")` allocations backed by `cuMemAlloc` via `CudaDefaultAllocator` can be passed to CPU kernels. Phase 1 exposes the capability as a device property, but `Device.can_access()` and `verify_launch_array_access` remain conservative for CPU-to-CUDA Warp arrays because Warp's built-in CUDA arrays are not CUDA managed-memory allocations.
+- **`CU_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST`** -- answers "can the CPU directly access CUDA managed memory resident on the GPU without migration?" This does not imply that Warp `wp.array(device="cuda:0")` allocations backed by `cuMemAlloc` via `CudaDefaultAllocator` can be safely passed to CPU kernels. Phase 1 exposes the capability as a device property, but `Device.can_access()` and `LaunchVerificationMode.CHECKED` remain conservative for CPU-to-CUDA Warp arrays because Warp's built-in CUDA arrays are not CUDA managed-memory allocations. `LaunchVerificationMode.RELAXED` still passes those pointers through when requested by the user.
 
 - **`CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED`** -- answers "do CPU-GPU atomics work natively across the interconnect?" On systems where this is true (DGX Spark / GB10 and Jetson Thor as tested), a GPU `atomicAdd` targeting a CPU-resident address produces correct results via hardware coherency. On HMM systems, the same operation can silently produce wrong results -- the GPU atomic hits a page backed by CPU physical memory without hardware coherency for atomic operations. Exposing this as a device property lets users and downstream tools (e.g., documentation, `wp.prefetch()` heuristics) reason about atomic safety. This attribute must be treated independently from `direct_managed_mem_access_from_host`.
 
-The first attribute is needed to gate the GPU-accessing-CPU branch in `can_access()` and launch verification. The second and third are exposed as queryable device properties for users who need to reason about managed-memory host access and cross-device atomic safety. `can_access()` and launch verification do not use `direct_managed_mem_access_from_host` for CPU-to-CUDA default arrays because those are not CUDA managed-memory allocations.
+The first attribute is needed to gate the GPU-accessing-CPU branch in `Device.can_access()`, `wp.can_access(device, array)`, and allocation-aware launch verification. The second and third are exposed as queryable device properties for users who need to reason about managed-memory host access and cross-device atomic safety. `Device.can_access()`, `wp.can_access(device, array)`, and `LaunchVerificationMode.CHECKED` do not use `direct_managed_mem_access_from_host` for CPU-to-CUDA default arrays because those are not CUDA managed-memory allocations.
 
 **Native layer changes (`warp/native/warp.cu`, `warp/native/warp.h`)**
 
@@ -424,56 +426,51 @@ def can_access(self, other):
 - The `is_peer_access_enabled()` call in the GPU-to-GPU branch is the module-level function in `warp/_src/context.py`. It lives in the same module as `Device`, so no additional import is needed.
 - The `self.context == other.context` check catches same-device access and same-context aliases. It also covers CPU-to-CPU access because the CPU device has no CUDA context.
 - The TODO in the existing code mentions that access depends on the _resource_ (allocation type), not just the device pair. `Device.can_access()` remains a conservative device-level check: it returns `True` only when standard/default allocations on the other device are accessible. This avoids turning a device-only API into an allocation-specific oracle.
-- `can_access()` is NOT called in the default launch path. It is invoked by APIs and user code that need the device-level/default-allocation answer. The launch verification path uses a private array-aware helper so CUDA default allocations and CUDA memory-pool allocations can be checked against the correct access state.
+- `Device.can_access()` is NOT called in the default launch path. It is invoked by APIs and user code that need the device-level/default-allocation answer. The launch verification path uses the same private array-aware helper exposed through top-level `wp.can_access(device, array)` so CUDA default allocations and CUDA memory-pool allocations can be checked against the correct access state.
 
-#### 1c. Remove the Launch Device Check
+#### 1c. Add Top-Level `wp.can_access(device, array)`
 
-Change `pack_arg()`.
-
-**Scope:** This change only removes the device check for `array` arguments. Other device-bound types (textures, volumes, hash grids) have their own device checks later in `pack_arg()` and remain strict (`value.device != device`). Relaxing those is out of scope for Phase 1: textures and volumes have GPU-side handles (CUDA texture objects, device pointers to internal structures) that may not be accessible cross-device even on systems with ATS system-memory access.
-
-The `pack_arg()` function is called for both forward and adjoint arguments through `pack_args()`. The removed check applies to both paths, so cross-device arrays work in backward passes on capable hardware.
-
-Replace:
+Add a public, resource-oriented access query in `warp/_src/context.py` and export it from `warp/__init__.py`:
 
 ```python
-# check device
-if value.device != device:
-    raise RuntimeError(
-        f"Error launching kernel '{kernel.key}', trying to launch on "
-        f"device='{device}', but input array for argument '{arg_name}' "
-        f"is on device={value.device}."
-    )
+def can_access(device: DeviceLike, resource) -> bool:
+    """Return whether ``device`` can directly access ``resource``.
+
+    Phase 1 supports :class:`warp.array` resources only. Future phases may extend
+    this function to other device-bound resources such as hash grids and meshes.
+    """
+    device = runtime.get_device(device)
+
+    if warp._src.types.is_array(resource):
+        return _is_array_accessible_from_device(resource, device)
+
+    raise TypeError("wp.can_access() only supports Warp arrays in this release")
 ```
 
-With:
+`wp.can_access(device, array)` answers whether code running on `device` can directly dereference the memory backing `array`. It is allocation-aware where Warp can identify or trust the allocation:
+
+- Same device/context returns `True`.
+- CUDA device accessing a CPU array returns `True` for pinned CPU arrays on UVA CUDA devices, and otherwise follows `device.is_cpu_memory_access_from_gpu_supported`.
+- CPU accessing a CUDA array returns `False` for current Warp CUDA arrays because Warp's CUDA allocators do not create CUDA managed-memory allocations.
+- CUDA device accessing a CUDA array on another CUDA device uses peer access for `CudaDefaultAllocator` arrays and memory-pool access for `CudaMempoolAllocator` arrays.
+- CUDA arrays backed by custom allocators or externally wrapped allocations fail closed for cross-device access because Warp cannot know whether peer access, memory-pool access, managed-memory semantics, or some other authorization path applies.
+
+`False` therefore means "Warp cannot verify that this resource is directly accessible", not necessarily "the hardware could never access this pointer." Advanced users may still use `LaunchVerificationMode.RELAXED` to pass pointers through when they know the allocation is valid for the launch device.
+
+The API intentionally does not support `wp.can_access(device, device)`. Device-level/default-allocation queries remain available as `Device.can_access(other_device)`. Keeping the top-level API resource-oriented leaves room to add `wp.can_access(device, hash_grid)` and `wp.can_access(device, mesh)` later without overloading it as another device-pair predicate.
+
+Implementation uses the same private helper that powers `LaunchVerificationMode.CHECKED`, following Warp array views to their owner allocation where possible:
 
 ```python
-# Verify array allocation accessibility (opt-in diagnostic mode).
-# By default, no check is performed and the pointer is passed
-# straight through to the hardware.  On systems with unified
-# system-memory access (HMM or host-page-table ATS) this is correct;
-# on discrete GPUs without
-# HMM the kernel will fault with CUDA_ERROR_ILLEGAL_ADDRESS if the
-# access is invalid.  Enable warp.config.verify_launch_array_access to get a
-# clear Python error *before* the kernel runs.
-if (
-    warp.config.verify_launch_array_access
-    and value.device != device
-    and not _is_array_accessible_from_device(value, device)
-):
-    raise RuntimeError(
-        f"Error launching kernel '{kernel.key}', trying to launch on device='{device}', "
-        f"but input array for argument '{arg_name}' is on device={value.device}, "
-        f"whose array allocation is not accessible from '{device}'. Move the array to "
-        f"'{device}', enable the required peer/coherent access, or disable warp.config.verify_launch_array_access "
-        f"only if this launch is valid for the hardware and allocation type."
-    )
-```
+def _get_array_allocator(value):
+    while warp._src.types.is_array(value):
+        allocator = getattr(value, "_allocator", None)
+        if allocator is not None:
+            return allocator
+        value = getattr(value, "_ref", None)
+    return None
 
-The private helper checks the actual Warp array allocation where Warp can determine it:
 
-```python
 def _is_array_accessible_from_device(value, device):
     device = runtime.get_device(device)
     value_device = value.device
@@ -487,7 +484,7 @@ def _is_array_accessible_from_device(value, device):
     if device.is_cpu and value_device.is_cuda:
         return False
     if device.is_cuda and value_device.is_cuda:
-        allocator = getattr(value, "_allocator", None)
+        allocator = _get_array_allocator(value)
         if isinstance(allocator, CudaMempoolAllocator):
             return is_mempool_access_enabled(value_device, device)
         if isinstance(allocator, CudaDefaultAllocator):
@@ -496,52 +493,132 @@ def _is_array_accessible_from_device(value, device):
     return False
 ```
 
-**Design rationale:** The previous design called `can_access()` on every array argument of every launch. Even though `can_access()` is cheap (property lookups), it adds up in hot launch paths with many array arguments. Removing the check entirely by default means `pack_arg()` does strictly less work for the normal path: when `verify_launch_array_access` is `False`, the branch short-circuits before any device comparison, allocation inspection, or native peer/mempool query. The verification mode gates the check behind a single boolean test, which the branch predictor will eliminate after the first few calls.
+#### 1d. Remove the Launch Device Check
 
-#### 1d. Verification Mode Config Flag
+Change `pack_arg()`.
+
+**Scope:** This change only removes the device check for `array` arguments. Other device-bound types (textures, volumes, hash grids) have their own device checks later in `pack_arg()` and remain strict (`value.device != device`). Relaxing those is out of scope for Phase 1: textures and volumes have GPU-side handles (CUDA texture objects, device pointers to internal structures) that may not be accessible cross-device even on systems with ATS system-memory access.
+
+The `pack_arg()` function is called for both forward and adjoint arguments through `pack_args()`. The removed check applies to both paths, so cross-device arrays work in backward passes on capable hardware.
+
+Replace the unconditional device check:
+
+```python
+# check device
+if value.device != device:
+    raise RuntimeError(
+        f"Error launching kernel '{kernel.key}', trying to launch on "
+        f"device='{device}', but input array for argument '{arg_name}' "
+        f"is on device={value.device}."
+    )
+```
+
+With a policy gate and helper call:
+
+```python
+if warp.config.launch_verification_mode != warp.config.LaunchVerificationMode.RELAXED:
+    _validate_launch_array_access(kernel, arg_name, value, device)
+```
+
+`LaunchVerificationMode.RELAXED` is the default and performs no launch array access check. This includes CPU launches with CUDA arrays. Warp still validates array type, dtype, and dimension before passing the pointer through.
+
+`LaunchVerificationMode.STRICT` restores the original same-device policy:
+
+```python
+if value.device != device:
+    _raise_launch_array_access_error(kernel, arg_name, value, device)
+```
+
+`LaunchVerificationMode.CHECKED` checks the actual Warp array allocation where Warp can determine it, using the same `_is_array_accessible_from_device()` helper as `wp.can_access(device, array)`.
+
+The policy helper is responsible for mode validation:
+
+```python
+def _validate_launch_array_access(kernel, arg_name, value, device):
+    mode = warp.config.launch_verification_mode
+
+    if value.device == device:
+        return
+
+    if mode == warp.config.LaunchVerificationMode.STRICT:
+        _raise_launch_array_access_error(kernel, arg_name, value, device)
+
+    if mode == warp.config.LaunchVerificationMode.CHECKED:
+        if not _is_array_accessible_from_device(value, device):
+            _raise_launch_array_access_error(kernel, arg_name, value, device)
+        return
+
+    raise ValueError(
+        "warp.config.launch_verification_mode must be a LaunchVerificationMode value"
+    )
+```
+
+**Design rationale:** The previous launch design called the access predicate on every array argument of every launch. Even though the predicate is cheap (property lookups), it adds up in hot launch paths with many array arguments. The default `RELAXED` mode does not call the policy helper, so the normal path avoids device comparison, allocation inspection, and native peer/mempool queries. `STRICT` gives users the old fast same-device check, while `CHECKED` gives allocation-aware diagnostics for debugging mixed-device launches.
+
+#### 1e. Launch Verification Mode Config
 
 Add to `warp/config.py`:
 
 ```python
-verify_launch_array_access: bool = False
-"""Enable kernel launch argument accessibility checking.
+from enum import IntEnum
 
-When enabled, Warp checks whether array arguments are accessible from the launch
-device before passing their pointers to the kernel. For Warp-owned arrays, this
-uses the array's allocation type where Warp can determine it. This restores
-pre-launch diagnostics for mixed-device launches that depend on hardware CPU/GPU
-memory access support.
+
+class LaunchVerificationMode(IntEnum):
+    """Kernel launch array access verification modes."""
+
+    STRICT = 0
+    """Require every Warp array argument to be on the launch device."""
+
+    RELAXED = 1
+    """Perform no launch array access checks and pass pointers through."""
+
+    CHECKED = 2
+    """Check cross-device Warp array accessibility before launch where possible."""
+
+
+launch_verification_mode: LaunchVerificationMode = LaunchVerificationMode.RELAXED
+"""Kernel launch array access verification mode.
+
+``LaunchVerificationMode.RELAXED`` performs no launch array access checks and is
+the default. ``LaunchVerificationMode.STRICT`` requires every Warp array argument
+to be on the launch device, matching Warp's original behavior.
+``LaunchVerificationMode.CHECKED`` checks whether cross-device Warp array
+arguments are accessible from the launch device before passing their pointers to
+the kernel. For Warp-owned arrays, checked mode uses the array's allocation type
+where Warp can determine it.
 
 Unlike ``verify_cuda``, this setting can be used during CUDA graph capture
 because checks run before each launch is recorded. For cross-GPU graph capture,
 enable peer or memory-pool access with Warp APIs before capture begins.
 
-Note: Enabling this flag impacts performance.
+Note: Strict and checked modes impact performance.
 """
 ```
 
 **When to use:** If a user on a discrete GPU (without HMM) accidentally passes a CPU array to a GPU kernel, the kernel will fault with `CUDA_ERROR_ILLEGAL_ADDRESS`. This error is asynchronous and can corrupt the CUDA context, requiring a process restart. The recommended workflow is:
 
 1. Observe the CUDA error.
-2. Set `warp.config.verify_launch_array_access = True`.
+2. Set `warp.config.launch_verification_mode = warp.config.LaunchVerificationMode.CHECKED`.
 3. Re-run. The clear Python `RuntimeError` identifies which kernel and which argument caused the mismatch, before the kernel ever launches.
-4. Fix the code, disable verification.
+4. Fix the code, then restore `LaunchVerificationMode.RELAXED` for the default fast path.
 
-`verify_launch_array_access` is compatible with CUDA graph capture because the checks happen before each launch is recorded and do not depend on post-launch CUDA error polling. Cross-GPU graph captures still depend on the correct access mode being enabled before capture: peer access for default CUDA allocations and memory-pool access for CUDA memory-pool allocations. Warp records peer and memory-pool access state when `wp.set_peer_access_enabled()` and `wp.set_mempool_access_enabled()` are called so graph-capture verification does not need to issue CUDA access-query calls while capture is active.
+`launch_verification_mode` is compatible with CUDA graph capture because `STRICT` and `CHECKED` checks happen before each launch is recorded and do not depend on post-launch CUDA error polling. Cross-GPU graph captures still depend on the correct access mode being enabled before capture: peer access for default CUDA allocations and memory-pool access for CUDA memory-pool allocations. Warp records peer and memory-pool access state when `wp.set_peer_access_enabled()` and `wp.set_mempool_access_enabled()` are called so graph-capture verification does not need to issue CUDA access-query calls while capture is active.
 
-#### 1e. User-facing Documentation
+#### 1f. User-facing Documentation
 
 Add `docs/deep_dive/memory_access.rst` and link it from the docs index and device guide. The page should explain the CPU/GPU memory model for advanced users, including:
 
 - The three public `Device` properties and that they are `False` for CPU devices.
 - How to guard mixed CPU/GPU launches using the capability properties.
-- How `Device.can_access()` relates to CPU/GPU capability properties and GPU/GPU peer access, and how launch verification differs by checking the actual Warp array allocation where possible.
-- How and when to use `wp.config.verify_launch_array_access`, including its CUDA graph capture compatibility.
+- How `Device.can_access()` relates to CPU/GPU capability properties and GPU/GPU peer access.
+- How `wp.can_access(device, array)` checks a specific Warp array allocation, why it fails closed for unknown/custom CUDA allocations, and why `wp.can_access(device, device)` is not supported.
+- How launch verification uses the same allocation-aware predicate as `wp.can_access(device, array)`.
+- How and when to use `wp.config.launch_verification_mode`, including its CUDA graph capture compatibility.
 - Why direct loads/stores do not imply CPU/GPU atomic safety.
 
 #### Behavior matrix after Phase 1
 
-Default mode (`verify_launch_array_access = False`): no Python-level checking. The hardware decides.
+Default mode (`LaunchVerificationMode.RELAXED`): no Python-level launch array access checking. The hardware decides.
 
 | Launch device | Array device | Discrete GPU (no HMM) | HMM system | Jetson Thor | Host-page-table ATS (DGX Spark / GB10 observed) |
 |---|---|---|---|---|---|
@@ -551,7 +628,17 @@ Default mode (`verify_launch_array_access = False`): no Python-level checking. T
 | `cpu` | `cuda:0` | **Segfault** | **Segfault** | **Segfault** | **Segfault** for Warp default arrays |
 | `cuda:0` | `cuda:1` | CUDA fault / OK (peer or mempool access, depending on allocation) | CUDA fault / OK (peer or mempool access, depending on allocation) | N/A on single-GPU Thor | CUDA fault / OK (peer or mempool access, depending on allocation) |
 
-Verification mode (`verify_launch_array_access = True`): each Warp-owned array argument is checked with allocation-aware launch verification where Warp can determine the allocator.
+Strict mode (`LaunchVerificationMode.STRICT`): every cross-device Warp array argument is rejected before launch.
+
+| Launch device | Array device | All systems |
+|---|---|---|
+| `cuda:0` | `cuda:0` | OK (same device) |
+| `cuda:0` | `cpu` (pageable) | **RuntimeError** |
+| `cuda:0` | `cpu` (pinned) | **RuntimeError** |
+| `cpu` | `cuda:0` | **RuntimeError** |
+| `cuda:0` | `cuda:1` | **RuntimeError** |
+
+Checked mode (`LaunchVerificationMode.CHECKED`): each Warp-owned array argument is checked with allocation-aware launch verification where Warp can determine the allocator.
 
 | Launch device | Array device | Discrete GPU (no HMM) | HMM system | Jetson Thor | Host-page-table ATS (DGX Spark / GB10 observed) |
 |---|---|---|---|---|---|
@@ -561,7 +648,7 @@ Verification mode (`verify_launch_array_access = True`): each Warp-owned array a
 | `cpu` | `cuda:0` | **RuntimeError** | **RuntimeError** | **RuntimeError** | **RuntimeError** for Warp default arrays |
 | `cuda:0` | `cuda:1` | RuntimeError / OK (peer or mempool access, depending on allocation) | RuntimeError / OK (peer or mempool access, depending on allocation) | N/A on single-GPU Thor | RuntimeError / OK (peer or mempool access, depending on allocation) |
 
-On a standard discrete-GPU workstation without HMM, users who pass a CPU array to a GPU kernel will get a CUDA fault instead of the current Python `RuntimeError`. This is a deliberate tradeoff: zero overhead in the launch path for all users, at the cost of a less friendly error for an incorrect program. The verification mode restores the friendly error for diagnosis.
+On a standard discrete-GPU workstation without HMM, users who pass a CPU array to a GPU kernel in `RELAXED` mode will get a CUDA fault instead of the current Python `RuntimeError`. This is a deliberate tradeoff: zero overhead in the launch path for the default mode, at the cost of a less friendly error for an incorrect program. `CHECKED` mode restores the friendly allocation-aware error for diagnosis, and `STRICT` mode restores the original same-device rule.
 
 #### Stream selection for cross-device launches
 
@@ -797,7 +884,7 @@ Users who want automatic prefetch can enable it globally via `warp.config.auto_p
 
 **Goal:** When source and destination arrays are on different devices and the destination-side copy kernel can directly access the source allocation, skip the staging buffer logic in `wp.copy()`.
 
-No new attributes or native functions. This should reuse the Phase 1 access predicates, but the final implementation must be allocation-aware for arrays where Warp can determine the allocator. `Device.can_access()` is sufficient for the device-level/default-allocation cases; CUDA memory-pool allocations need the same allocation-aware distinction used by `verify_launch_array_access`.
+No new attributes or native functions. This should reuse the Phase 1 array access predicate through `wp.can_access(dest.device, src)` so the copy optimization makes the same allocation-aware decisions as launch verification.
 
 The current `wp.copy()` implementation has a TODO for this:
 
@@ -813,10 +900,10 @@ On systems where `is_cpu_memory_access_from_gpu_supported` is true, the GPU can 
 if src.device != dest.device:
     # If direct access is available, we can copy non-contiguous arrays
     # without staging, using a kernel on the destination device.
-    if _is_array_accessible_from_device(src, dest.device):
+    if wp.can_access(dest.device, src):
         # Launch a copy kernel on the destination device that reads
         # directly from the source array's memory.
-        pass  # Implementation details TBD
+        launch_direct_access_copy(src, dest)
     else:
         # Existing staging buffer logic for non-contiguous arrays...
         ...
@@ -824,9 +911,9 @@ if src.device != dest.device:
 
 This is a performance optimization and not required for correctness -- the existing staging approach works correctly on all systems.
 
-### Phase 5: Public Allocation-Aware Access Checks (Future)
+### Phase 5: Expand Resource and Allocation Metadata (Future)
 
-**Goal:** Extend the internal allocation-aware checks introduced in Phase 1 into a public, fine-grained access model that can answer questions about specific arrays, including pinned CPU memory, future managed-memory allocators, custom allocators, and externally wrapped allocations.
+**Goal:** Extend the public `wp.can_access(device, resource)` API introduced in Phase 1 beyond Warp arrays, and add richer allocation metadata for cases Phase 1 must conservatively treat as unknown. Candidate future resources include hash grids and meshes. Candidate allocation refinements include future managed-memory allocators, custom allocator access declarations, and externally wrapped allocations with explicit access metadata.
 
 This phase introduces one additional device attribute.
 
@@ -836,22 +923,11 @@ This phase introduces one additional device attribute.
 
 This attribute distinguishes the "limited" unified memory paradigm (limited Tegra, Windows -- `concurrent_managed_access == 0`) from the "full" paradigms (`concurrent_managed_access == 1`). On limited systems, `cudaMallocManaged` allocations bulk-migrate and cannot be concurrently accessed by CPU and GPU. On full systems, managed allocations support page-granularity migration with concurrent access.
 
-The public allocation-aware API needs this because it must answer: "if this specific array was allocated with `cudaMallocManaged` (a future Warp managed allocator), can the GPU access it concurrently with the CPU?" The answer depends on this attribute.
+Expanded allocation metadata needs this because it must answer: "if this specific array was allocated with `cudaMallocManaged` (a future Warp managed allocator), can the GPU access it concurrently with the CPU?" The answer depends on this attribute.
 
-#### Allocator tracking
+#### Allocator and resource tracking
 
-Phase 1 launch verification already distinguishes the two built-in CUDA
-allocator classes when checking GPU-to-GPU array arguments:
-
-- `CudaDefaultAllocator` uses CUDA peer access (`set_peer_access_enabled()` /
-  `is_peer_access_enabled()`).
-- `CudaMempoolAllocator` uses CUDA memory-pool access
-  (`set_mempool_access_enabled()` / `is_mempool_access_enabled()`).
-
-Future allocation-aware work remains useful for exposing CPU pinned-memory
-behavior through a public API, and for future managed-memory allocators, custom
-allocators, and externally wrapped allocations. Currently, Warp has four allocator
-classes:
+Phase 1 `wp.can_access(device, array)` and launch verification already distinguish the allocation classes Warp can identify:
 
 - `CpuDefaultAllocator` -- uses `wp_alloc_host` (wraps `malloc`/`calloc`)
 - `CpuPinnedAllocator` -- uses `wp_alloc_pinned` (wraps `cudaMallocHost`)
@@ -859,32 +935,20 @@ classes:
 - `CudaMempoolAllocator` -- uses `wp_alloc_device_async` (wraps `cuMemAllocAsync`)
 
 On a discrete GPU without HMM:
-- Pinned CPU allocations (`CpuPinnedAllocator`) ARE GPU-accessible through UVA, and Phase 1 launch verification accepts Warp-owned pinned CPU arrays when `device.is_uva` is true. `Device.can_access()` remains a device-level/default-allocation query and still does not distinguish pinned CPU arrays from ordinary CPU arrays.
+- Pinned CPU allocations (`CpuPinnedAllocator`) ARE GPU-accessible through UVA, and Phase 1 `wp.can_access(device, array)` plus launch verification accept Warp-owned pinned CPU arrays when `device.is_uva` is true. `Device.can_access()` remains a device-level/default-allocation query and still does not distinguish pinned CPU arrays from ordinary CPU arrays.
 - Default CPU allocations (`CpuDefaultAllocator`) are NOT GPU-accessible.
 - Both CUDA allocators produce GPU-only memory.
 
-For CPU pinned memory and future managed-memory allocators, prefer a public
-array-level API such as `array.is_accessible_from(device)` over adding optional
-allocation parameters to `Device.can_access()`:
+Phase 5 should preserve the same public API shape:
 
 ```python
-def is_accessible_from(self, device):
-    """..."""
-    device = runtime.get_device(device)
-
-    # GPU accessing CPU memory without HMM/host-page-table ATS.
-    if device.is_cuda and self.device.is_cpu:
-        if device.is_cpu_memory_access_from_gpu_supported:
-            return True
-        # Pinned allocations are always GPU-accessible via UVA.
-        if self.pinned and device.is_uva:
-            return True
-        return False
+wp.can_access(device, hash_grid)
+wp.can_access(device, mesh)
 ```
 
-Phase 1 uses this logic internally for `wp.launch()` verification. Phase 5 would
-make the same allocation-aware answer available to user code without overloading
-`Device.can_access()` with allocation-specific parameters.
+It should not add `wp.can_access(device, device)`. Device-to-device/default-allocation checks should continue to live on `Device.can_access(other_device)`.
+
+For custom allocators and externally wrapped allocations, Phase 5 may add an explicit metadata protocol so owners can declare which access predicate applies. Until such metadata exists, cross-device `wp.can_access(device, array)` remains conservative and returns `False` for unknown CUDA allocations.
 
 ## Testing Strategy
 
@@ -896,7 +960,7 @@ Add a test module `warp/tests/cuda/test_unified_memory.py` (registered in `warp/
 - Verify `is_cpu_memory_access_from_gpu_supported`, `is_gpu_memory_access_from_cpu_supported`, and `is_cpu_gpu_atomic_supported` are `bool` for CUDA devices and `False` for CPU devices.
 - Do not assert that `is_cpu_gpu_atomic_supported` implies `is_gpu_memory_access_from_cpu_supported`; Jetson Thor reports native CPU-GPU atomics while still rejecting direct CPU access to `cudaMalloc` memory.
 
-**`can_access()` tests (run on all hardware):**
+**`Device.can_access()` tests (run on all hardware):**
 - `device.can_access(device)` is always `True` for every device.
 - CPU-to-CPU: always `True`.
 - GPU-to-CPU and CPU-to-GPU: assert the result is consistent with Warp default allocation rules:
@@ -904,23 +968,32 @@ Add a test module `warp/tests/cuda/test_unified_memory.py` (registered in `warp/
   - CPU-to-GPU should be `False` for Warp default CUDA arrays, even if managed-memory host access is supported.
 - GPU-to-GPU peer: enable peer access, verify `can_access()` returns `True`. Disable, verify `False`.
 
+**`wp.can_access(device, array)` tests (run on all hardware):**
+- Same-device arrays return `True`.
+- CPU arrays checked from a CUDA device match `device.is_cpu_memory_access_from_gpu_supported` for pageable CPU arrays and return `True` for pinned CPU arrays when `device.is_uva` is true.
+- CPU checking a Warp CUDA array returns `False`.
+- CUDA arrays checked from another CUDA device use peer access for default CUDA allocations and memory-pool access for CUDA memory-pool allocations.
+- Cross-device CUDA arrays backed by custom allocators or externally wrapped allocations return `False` unless they are on the same device/context.
+- Passing a device as the second argument (`wp.can_access(device, other_device)`) raises `TypeError`.
+
 **Cross-device launch tests (hardware-dependent, skip on incapable systems):**
 - On systems where `cuda_device.is_cpu_memory_access_from_gpu_supported` is `True`: allocate a CPU array, launch a GPU kernel that reads and writes it, verify results match expected values.
-- On CUDA devices with `device.is_uva`: allocate pinned CPU arrays and verify GPU kernels can read from and write to them with `warp.config.verify_launch_array_access = True`.
+- On CUDA devices with `device.is_uva`: allocate pinned CPU arrays and verify GPU kernels can read from and write to them with `warp.config.launch_verification_mode = warp.config.LaunchVerificationMode.CHECKED`.
 - Test with output arrays (not just inputs).
 - Test with multi-dimensional arrays with non-trivial strides.
 
 **Verification mode tests (run on all hardware):**
-- With `warp.config.verify_launch_array_access = True` on a discrete GPU without HMM: verify that launching with a CPU array raises `RuntimeError` (not a CUDA fault).
-- With `warp.config.verify_launch_array_access = True` on an HMM / host-page-table ATS system: verify that GPU launches with CPU arrays still succeed (no false positive).
-- With `warp.config.verify_launch_array_access = False` (default): verify that no Python-level device check occurs (cross-device arrays are passed through without error from `pack_arg()`).
-- With `warp.config.verify_launch_array_access = True` during CUDA graph capture: capture and replay a same-device CUDA launch successfully.
-- On multi-GPU systems with a peer-access-supported pair: allocate with CUDA memory pools disabled, enable peer access before capture, pass an array from the source GPU to a kernel launched on the peer GPU with `verify_launch_array_access = True`, capture and replay the graph, and verify the results. Skip cleanly when no peer-access pair exists.
-- On multi-GPU systems with a memory-pool-access-supported pair: allocate with CUDA memory pools enabled, enable memory-pool access before capture, pass an array from the source GPU to a kernel launched on the peer GPU with `verify_launch_array_access = True`, capture and replay the graph, and verify the results.
+- With `LaunchVerificationMode.RELAXED` (default): verify that no Python-level device check occurs. Cross-device arrays should be accepted by `pack_arg()` under `record_cmd=True`, including CPU launches with CUDA arrays, without executing unsafe kernels.
+- With `LaunchVerificationMode.STRICT`: verify that any cross-device Warp array argument raises `RuntimeError`, including cases that `CHECKED` would allow, such as pinned CPU arrays on UVA CUDA devices or ordinary CPU arrays on HMM / host-page-table ATS systems.
+- With `LaunchVerificationMode.CHECKED` on a discrete GPU without HMM: verify that launching with a CPU array raises `RuntimeError` (not a CUDA fault).
+- With `LaunchVerificationMode.CHECKED` on an HMM / host-page-table ATS system: verify that GPU launches with CPU arrays still succeed (no false positive).
+- With `LaunchVerificationMode.CHECKED` during CUDA graph capture: capture and replay a same-device CUDA launch successfully.
+- On multi-GPU systems with a peer-access-supported pair: allocate with CUDA memory pools disabled, enable peer access before capture, pass an array from the source GPU to a kernel launched on the peer GPU with `LaunchVerificationMode.CHECKED`, capture and replay the graph, and verify the results. Skip cleanly when no peer-access pair exists.
+- On multi-GPU systems with a memory-pool-access-supported pair: allocate with CUDA memory pools enabled, enable memory-pool access before capture, pass an array from the source GPU to a kernel launched on the peer GPU with `LaunchVerificationMode.CHECKED`, capture and replay the graph, and verify the results.
 - On multi-GPU systems, test default CUDA allocations and CUDA memory-pool allocations separately:
-  - Default CUDA allocations should be accepted by `verify_launch_array_access` when peer access is enabled.
-  - CUDA memory-pool allocations should be accepted by `verify_launch_array_access` when memory-pool access is enabled, even if peer access is disabled.
-  - CUDA memory-pool allocations should be rejected by `verify_launch_array_access` when memory-pool access is disabled, even if peer access is enabled.
+  - Default CUDA allocations should be accepted by `LaunchVerificationMode.CHECKED` when peer access is enabled.
+  - CUDA memory-pool allocations should be accepted by `LaunchVerificationMode.CHECKED` when memory-pool access is enabled, even if peer access is disabled.
+  - CUDA memory-pool allocations should be rejected by `LaunchVerificationMode.CHECKED` when memory-pool access is disabled, even if peer access is enabled.
 
 ### Phase 2 tests (prefetch)
 
@@ -937,7 +1010,7 @@ Add a test module `warp/tests/cuda/test_unified_memory.py` (registered in `warp/
 ### CI considerations
 
 - The existing CI may not have HMM, ATS, Jetson Thor, or DGX Spark / GB10 hardware. Tests that require specific paradigms should use `unittest.skipUnless` based on the device attributes queried in Phase 1.
-- Tests that only query attributes (Phase 1 attribute and `can_access()` invariant tests) should run on all hardware.
+- Tests that only query attributes (Phase 1 attribute and `Device.can_access()` / `wp.can_access()` invariant tests) should run on all hardware.
 - Consider adding a CI label or tag for "unified memory" tests so they can be selectively run on appropriate hardware.
 
 ### Device compatibility matrix for test expectations
@@ -948,8 +1021,10 @@ Add a test module `warp/tests/cuda/test_unified_memory.py` (registered in `warp/
 | CPU can access Warp default GPU arrays | No | No | No | No | No | No |
 | CPU can access GPU-resident CUDA managed memory | No | No | Yes | No | No | No |
 | Native CPU-GPU atomics on host-visible memory | No | No | Yes | Device-dependent | Yes | Yes |
-| Cross-device launch GPU->CPU array (default) | CUDA fault | OK | OK | CUDA fault | OK | OK |
-| Cross-device launch CPU->GPU array (default) | Segfault | Segfault | Segfault for Warp default arrays | Segfault | Segfault | Segfault for Warp default arrays |
-| Cross-device launch GPU->CPU array (verify mode) | RuntimeError | OK | OK | RuntimeError | OK | OK |
-| Cross-device launch CPU->GPU array (verify mode) | RuntimeError | RuntimeError | RuntimeError for Warp default arrays | RuntimeError | RuntimeError | RuntimeError for Warp default arrays |
+| Cross-device launch GPU->CPU array (`RELAXED`) | CUDA fault | OK | OK | CUDA fault | OK | OK |
+| Cross-device launch CPU->GPU array (`RELAXED`) | Segfault | Segfault | Segfault for Warp default arrays | Segfault | Segfault | Segfault for Warp default arrays |
+| Cross-device launch GPU->CPU array (`STRICT`) | RuntimeError | RuntimeError | RuntimeError | RuntimeError | RuntimeError | RuntimeError |
+| Cross-device launch CPU->GPU array (`STRICT`) | RuntimeError | RuntimeError | RuntimeError | RuntimeError | RuntimeError | RuntimeError |
+| Cross-device launch GPU->CPU array (`CHECKED`) | RuntimeError | OK | OK | RuntimeError | OK | OK |
+| Cross-device launch CPU->GPU array (`CHECKED`) | RuntimeError | RuntimeError | RuntimeError for Warp default arrays | RuntimeError | RuntimeError | RuntimeError for Warp default arrays |
 | `wp.prefetch()` for CPU arrays | No-op / warning | Yes (SW) | Yes (HW) | No-op / warning | Accepted; low expected benefit on integrated DRAM | Yes (HW) |
