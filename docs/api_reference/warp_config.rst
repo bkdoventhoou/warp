@@ -13,6 +13,8 @@ API
    :nosignatures:
    :toctree: _generated
 
+   LaunchVerificationMode
+   launch_verification_mode
    cache_kernels
    compile_time_trace
    cpu_compiler_flags
@@ -47,5 +49,4 @@ API
    verify_autograd_array_access
    verify_cuda
    verify_fp
-   verify_launch_array_access
    version

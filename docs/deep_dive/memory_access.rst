@@ -199,66 +199,73 @@ closed instead of assuming the pointer is safe to use.
 Launch Verification
 -------------------
 
-By default, Warp passes array pointers through to :func:`launch` without a
-pre-launch same-device check. This keeps the launch path lightweight and allows
-hardware-supported mixed CPU/GPU launches to work.
+By default, Warp passes array pointers through to :func:`launch` after type,
+dtype, and dimension validation. This keeps the launch path lightweight and
+allows hardware-supported mixed CPU/GPU launches to work.
 
-If you want a clear Python error before the kernel runs, enable
-:attr:`warp.config.verify_launch_array_access`:
+If you want a clear Python error before the kernel runs, set
+:attr:`warp.config.launch_verification_mode`:
 
 .. code:: python
 
-    wp.config.verify_launch_array_access = True
+    wp.config.launch_verification_mode = wp.config.LaunchVerificationMode.CHECKED
 
-When enabled, Warp checks each Warp array argument against the launch device
-before the pointer is passed to the kernel. For CPU arrays passed to CUDA
-kernels, pinned CPU arrays are accepted on CUDA devices with unified virtual
-addressing, and ordinary CPU arrays require
-``is_cpu_memory_access_from_gpu_supported``. For CUDA arrays, this check uses
-the allocation type where Warp can determine it: default CUDA allocations use
-CUDA peer-access state, while memory pool allocations use memory-pool access
-state. If the launch device cannot access the array allocation, or if Warp
-cannot verify a cross-device Warp array allocation, Warp raises a ``RuntimeError``
-identifying the offending argument. This is useful when
-debugging mixed-device launches on systems that do not support direct CPU/GPU
-memory access or on multi-GPU systems where peer and memory-pool access are
-configured separately.
+``LaunchVerificationMode.RELAXED`` is the default and performs no pre-launch
+array access checks. Warp passes pointers through after type, dtype, and
+dimension validation.
+
+``LaunchVerificationMode.STRICT`` restores Warp's original same-device rule and
+rejects every cross-device Warp array argument before launch.
+
+``LaunchVerificationMode.CHECKED`` checks each cross-device Warp array argument
+against the launch device. For CPU arrays passed to CUDA kernels, pinned CPU
+arrays are accepted on CUDA devices with unified virtual addressing, and
+ordinary CPU arrays require ``is_cpu_memory_access_from_gpu_supported``. For CUDA
+arrays, default CUDA allocations use CUDA peer-access state, while memory pool
+allocations use memory-pool access state.
+
+If the launch device cannot access the array allocation, or if Warp cannot
+verify a cross-device Warp array allocation, ``LaunchVerificationMode.CHECKED``
+raises a ``RuntimeError`` identifying the offending argument. This is useful
+when debugging mixed-device launches on systems that do not support direct
+CPU/GPU memory access or on multi-GPU systems where peer and memory-pool access
+are configured separately.
 
 Arrays backed by custom or externally wrapped allocators are a limitation of this
 diagnostic. Warp does not know the allocation kind for those arrays, so
-cross-device launches fail closed when
-:attr:`warp.config.verify_launch_array_access` is enabled unless a future
-allocator protocol exposes enough allocation metadata to select the correct
-access predicate.
+cross-device launches fail closed in ``LaunchVerificationMode.CHECKED`` unless a
+future allocator protocol exposes enough allocation metadata to select the
+correct access predicate.
 
 Directly passing an object that exposes ``__array_interface__`` or
 ``__cuda_array_interface__`` is different from passing a Warp array. Those
 protocols let Warp construct the kernel argument at launch time, but they do not
 give Warp enough allocation information to perform the same allocation-aware
-accessibility check. In this phase,
-:attr:`warp.config.verify_launch_array_access` does not fully verify directly
-passed objects exposing these protocols. Advanced users who know such an
-allocation is valid are responsible for ensuring that the launch device can
-legally access the pointer.
+accessibility check. In this phase, ``LaunchVerificationMode.CHECKED`` does not
+fully verify directly passed objects exposing these protocols. Advanced users
+who know such an allocation is valid are responsible for ensuring that the
+launch device can legally access the pointer.
 
 .. code:: python
 
     with wp.ScopedDevice("cuda:0"):
-        wp.config.verify_launch_array_access = True
+        wp.config.launch_verification_mode = wp.config.LaunchVerificationMode.CHECKED
         wp.launch(kernel, dim=a.size, inputs=[a])
 
-:attr:`warp.config.verify_launch_array_access` is a diagnostic option. It adds
-launch overhead and should usually be left disabled in performance-sensitive
-code.
+:attr:`warp.config.launch_verification_mode` can add launch overhead in
+``LaunchVerificationMode.STRICT`` and ``LaunchVerificationMode.CHECKED`` modes.
+Use ``LaunchVerificationMode.RELAXED`` in performance-sensitive code that has
+already validated its launch accessibility assumptions.
 
 Unlike :attr:`warp.config.verify_cuda`,
-:attr:`warp.config.verify_launch_array_access` can be used during CUDA graph
-capture because the checks run before each launch is recorded. For cross-GPU
-graph capture, enable peer access or memory-pool access with Warp APIs before
-capture begins so verification can use the recorded access state during capture.
-When a CUDA graph captures a launch with CPU array arguments, replay uses the
-same captured CPU pointers. If the arrays remain alive, CPU updates made between
-replays are visible to kernels on devices that can access CPU memory.
+:attr:`warp.config.launch_verification_mode` can be used during CUDA graph
+capture because ``LaunchVerificationMode.CHECKED`` checks run before each launch
+is recorded. For cross-GPU graph capture, enable peer access or memory-pool
+access with Warp APIs before capture begins so verification can use the recorded
+access state during capture. When a CUDA graph captures a launch with CPU array
+arguments, replay uses the same captured CPU pointers. If the arrays remain
+alive, CPU updates made between replays are visible to kernels on devices that
+can access CPU memory.
 
 
 Atomic Operations
@@ -349,7 +356,8 @@ do need zero-copy sharing, query the specific direction your algorithm requires:
 - GPU kernels use arrays from another GPU: enable peer access for default CUDA
   allocations, or memory-pool access for CUDA memory-pool allocations.
 - Debugging mixed-device launch failures: temporarily set
-  :attr:`warp.config.verify_launch_array_access` to ``True``.
+  :attr:`warp.config.launch_verification_mode` to
+  ``wp.config.LaunchVerificationMode.CHECKED``.
 
 Prefer capability checks over platform-name checks. They make code portable
 across discrete GPUs, HMM-enabled systems, Jetson, Grace, and future coherent
