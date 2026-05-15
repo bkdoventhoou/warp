@@ -7821,6 +7821,17 @@ def _is_array_accessible_from_device(value: warp.array, device: Device) -> bool:
     return False
 
 
+def _raise_launch_array_access_error(kernel, arg_name: str, value: warp.array, device: Device) -> None:
+    raise RuntimeError(
+        f"Error launching kernel '{kernel.key}', trying to launch on device='{device}', "
+        f"but input array for argument '{arg_name}' is on device={value.device}, "
+        f"whose array allocation is not accessible or cannot be verified as accessible from "
+        f"'{device}'. Move the array to '{device}', enable the required peer/coherent access, "
+        f"or disable warp.config.verify_launch_array_access only if this launch is valid "
+        f"for the hardware and allocation type."
+    )
+
+
 def event_from_ipc_handle(handle, device: DeviceLike = None) -> Event:
     """Create an event from an IPC handle.
 
@@ -7858,6 +7869,8 @@ def event_from_ipc_handle(handle, device: DeviceLike = None) -> Event:
 # given a kernel destination argument type and a value convert
 #  to a c-type that can be passed to a kernel
 def pack_arg(kernel, arg_type, arg_name, value, device, adjoint=False):
+    device = runtime.get_device(device)
+
     if warp._src.types.is_array(arg_type):
         if value is None:
             # allow for NULL arrays
@@ -7928,21 +7941,18 @@ def pack_arg(kernel, arg_type, arg_name, value, device, adjoint=False):
                     f"Error launching kernel '{kernel.key}', {adj}argument '{arg_name}' expects an array with {arg_type.ndim} dimension(s) but the passed array has {value.ndim} dimension(s)."
                 )
 
+            if device.is_cpu and value.device.is_cuda:
+                _raise_launch_array_access_error(kernel, arg_name, value, device)
+
             # Optional diagnostic check for mixed-device launches. By default, array pointers are passed
             # through and the hardware access rules determine whether the launch is valid.
             if (
-                warp.config.verify_launch_array_access
+                device.is_cuda
+                and warp.config.verify_launch_array_access
                 and value.device != device
                 and not _is_array_accessible_from_device(value, device)
             ):
-                raise RuntimeError(
-                    f"Error launching kernel '{kernel.key}', trying to launch on device='{device}', "
-                    f"but input array for argument '{arg_name}' is on device={value.device}, "
-                    f"whose array allocation is not accessible or cannot be verified as accessible from "
-                    f"'{device}'. Move the array to '{device}', enable the required peer/coherent access, "
-                    f"or disable warp.config.verify_launch_array_access only if this launch is valid "
-                    f"for the hardware and allocation type."
-                )
+                _raise_launch_array_access_error(kernel, arg_name, value, device)
 
             return value.__ctype__()
 

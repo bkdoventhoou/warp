@@ -122,6 +122,17 @@ def test_unified_memory_verify_rejects_cpu_reading_gpu_when_unsupported(test, de
             wp.launch(read_gpu_write_cpu, dim=src.size, inputs=[src], outputs=[dst], device="cpu", record_cmd=True)
 
 
+def test_unified_memory_cpu_launch_always_rejects_gpu_array(test, device):
+    """CPU kernels must never accept CUDA-backed arrays."""
+
+    src = wp.array(np.arange(4, dtype=np.float32), dtype=wp.float32, device=device)
+    dst = wp.empty(4, dtype=wp.float32, device="cpu")
+
+    with launch_verification(False):
+        with test.assertRaisesRegex(RuntimeError, "array allocation is not accessible or cannot be verified"):
+            wp.launch(read_gpu_write_cpu, dim=src.size, inputs=[src], outputs=[dst], device="cpu", record_cmd=True)
+
+
 def test_unified_memory_cuda_launch_reads_cpu_array_when_supported(test, device):
     """On coherent systems, GPU kernels can read ordinary CPU arrays directly."""
 
@@ -387,6 +398,12 @@ add_function_test(
     TestUnifiedMemory,
     "test_unified_memory_verify_rejects_cpu_reading_gpu_when_unsupported",
     test_unified_memory_verify_rejects_cpu_reading_gpu_when_unsupported,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestUnifiedMemory,
+    "test_unified_memory_cpu_launch_always_rejects_gpu_array",
+    test_unified_memory_cpu_launch_always_rejects_gpu_array,
     devices=cuda_devices,
 )
 add_function_test(
