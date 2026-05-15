@@ -66,6 +66,16 @@ def test_unified_memory_device_capabilities(test, device):
         test.assertFalse(device.is_cpu_gpu_atomic_supported)
 
 
+def test_unified_memory_launch_verification_mode_config(test, device):
+    """Launch verification mode is an enum-backed public config setting."""
+
+    test.assertEqual(int(wp.config.LaunchVerificationMode.STRICT), 0)
+    test.assertEqual(int(wp.config.LaunchVerificationMode.RELAXED), 1)
+    test.assertEqual(int(wp.config.LaunchVerificationMode.CHECKED), 2)
+    test.assertIs(wp.config.launch_verification_mode, wp.config.LaunchVerificationMode.RELAXED)
+    test.assertFalse(hasattr(wp.config, "verify_launch_array_access"))
+
+
 def test_unified_memory_can_access(test, device):
     """Device.can_access() reports conservative default-allocation reachability."""
 
@@ -375,6 +385,12 @@ add_function_test(
     "test_unified_memory_device_capabilities",
     test_unified_memory_device_capabilities,
     devices=devices,
+)
+add_function_test(
+    TestUnifiedMemory,
+    "test_unified_memory_launch_verification_mode_config",
+    test_unified_memory_launch_verification_mode_config,
+    devices=[wp.get_device("cpu")],
 )
 add_function_test(
     TestUnifiedMemory,

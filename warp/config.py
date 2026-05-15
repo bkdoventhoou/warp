@@ -16,6 +16,7 @@ For information on module-level and kernel-level settings, see :doc:`/user_guide
 
 import sys as _sys
 import types as _types
+from enum import IntEnum
 
 from warp._src.logger import LOG_INFO as _LOG_INFO
 from warp._src.logger import log_warning as _log_warning
@@ -81,6 +82,38 @@ def _install_config_module_hooks() -> None:
     _sys.modules[__name__].__class__ = _ConfigModule
 
 
+class LaunchVerificationMode(IntEnum):
+    """Kernel launch array access verification modes."""
+
+    STRICT = 0
+    """Require every Warp array argument to be on the launch device."""
+
+    RELAXED = 1
+    """Perform no launch array access checks and pass pointers through."""
+
+    CHECKED = 2
+    """Check cross-device Warp array accessibility before launch where possible."""
+
+
+launch_verification_mode: LaunchVerificationMode = LaunchVerificationMode.RELAXED
+"""Kernel launch array access verification mode.
+
+``LaunchVerificationMode.RELAXED`` performs no launch array access checks and is
+the default. ``LaunchVerificationMode.STRICT`` requires every Warp array argument
+to be on the launch device, matching Warp's original behavior.
+``LaunchVerificationMode.CHECKED`` checks whether cross-device Warp array
+arguments are accessible from the launch device before passing their pointers to
+the kernel. For Warp-owned arrays, checked mode uses the array's allocation type
+where Warp can determine it.
+
+Unlike ``verify_cuda``, this setting can be used during CUDA graph capture
+because checks run before each launch is recorded. For cross-GPU graph capture,
+enable peer or memory-pool access with Warp APIs before capture begins.
+
+Note: Strict and checked modes impact performance.
+"""
+
+
 version: str = "1.14.0.dev0"
 """Warp version string"""
 
@@ -98,26 +131,6 @@ verify_cuda: bool = False
 This setting cannot be used during graph capture
 
 Note: Enabling this flag impacts performance
-"""
-
-verify_launch_array_access: bool = False
-"""Enable kernel launch argument accessibility checking.
-
-When enabled, Warp checks whether ``warp.array`` arguments are accessible from
-the launch device before passing their pointers to the kernel. This check uses
-the array's allocation type where Warp can determine it. For cross-device
-``warp.array`` arguments whose allocation cannot be verified, Warp fails closed
-and raises an error instead of assuming the launch is safe. This includes
-arrays backed by custom or externally wrapped allocators whose allocation kind is
-not exposed to Warp. Directly passed ``__array_interface__`` and
-``__cuda_array_interface__`` objects are converted at launch time and are not
-fully allocation-verified by this setting.
-
-Unlike ``verify_cuda``, this setting can be used during CUDA graph capture
-because checks run before each launch is recorded. For cross-GPU graph capture,
-enable peer or memory-pool access with Warp APIs before capture begins.
-
-Note: Enabling this flag impacts performance.
 """
 
 print_launches: bool = False
