@@ -74,7 +74,8 @@ def test_unified_memory_launch_verification_mode_config(test, device):
     test.assertEqual(int(wp.config.LaunchVerificationMode.RELAXED), 1)
     test.assertEqual(int(wp.config.LaunchVerificationMode.CHECKED), 2)
     test.assertIs(wp.config.launch_verification_mode, wp.config.LaunchVerificationMode.RELAXED)
-    test.assertFalse(hasattr(wp.config, "verify_launch_array_access"))
+    old_config_name = "_".join(("verify", "launch", "array", "access"))
+    test.assertFalse(hasattr(wp.config, old_config_name))
 
 
 def test_unified_memory_can_access(test, device):

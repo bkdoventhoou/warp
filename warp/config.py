@@ -16,7 +16,7 @@ For information on module-level and kernel-level settings, see :doc:`/user_guide
 
 import sys as _sys
 import types as _types
-from enum import IntEnum
+from enum import IntEnum as _IntEnum
 
 from warp._src.logger import LOG_INFO as _LOG_INFO
 from warp._src.logger import log_warning as _log_warning
@@ -82,7 +82,7 @@ def _install_config_module_hooks() -> None:
     _sys.modules[__name__].__class__ = _ConfigModule
 
 
-class LaunchVerificationMode(IntEnum):
+class LaunchVerificationMode(_IntEnum):
     """Kernel launch array access verification modes."""
 
     STRICT = 0
