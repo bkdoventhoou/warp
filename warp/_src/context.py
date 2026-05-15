@@ -4154,15 +4154,17 @@ class Device:
     def can_access(self, other):
         """Return whether this device can access standard Warp allocations on another device.
 
-        This is a conservative device-level query. It does not inspect a specific allocation, and returns ``False``
-        when only some non-default allocation kinds, such as CUDA managed memory, may be accessible.
+        This is a conservative device-level query for default allocations. It does not inspect a specific allocation.
+        Use ``_is_array_accessible_from_device()`` when allocation-specific Warp array logic is needed, such as for
+        pinned CPU arrays or CUDA memory-pool allocations.
         """
 
         # TODO: this function should be redesigned in terms of (device, resource).
         # - a device can access any resource on the same device
         # - a CUDA device can access CPU memory when the device supports it
-        # - a CUDA device can access regular CUDA allocations on a peer device if peer access is enabled
-        # - a CUDA device can access mempool allocations on a peer device if mempool access is enabled
+        # - a CUDA device can access default CUDA allocations on a peer device if peer access is enabled
+        # Allocation-specific checks, including CUDA memory-pool allocations, are handled by
+        # _is_array_accessible_from_device().
         other = self.runtime.get_device(other)
 
         if self.context == other.context:
@@ -6471,9 +6473,20 @@ class Runtime:
         if device is None or not device.is_cuda:
             raise RuntimeError(f"Invalid CUDA device alias '{alias}'")
 
+        target_context = device.context
+        target_ordinal = device.ordinal
+
         del self.device_map[alias]
-        del self.context_map[device.context]
+        del self.context_map[target_context]
         self.cuda_devices.remove(device)
+
+        for key in list(self.cuda_peer_access_enabled):
+            if target_context in key:
+                del self.cuda_peer_access_enabled[key]
+
+        for key in list(self.cuda_mempool_access_enabled):
+            if target_ordinal in key:
+                del self.cuda_mempool_access_enabled[key]
 
     def verify_cuda_device(self, device: DeviceLike = None) -> None:
         if warp.config.verify_cuda:
