@@ -7840,8 +7840,27 @@ def _raise_launch_array_access_error(kernel, arg_name: str, value: warp.array, d
         f"but input array for argument '{arg_name}' is on device={value.device}, "
         f"whose array allocation is not accessible or cannot be verified as accessible from "
         f"'{device}'. Move the array to '{device}', enable the required peer/coherent access, "
-        f"or disable warp.config.verify_launch_array_access only if this launch is valid "
-        f"for the hardware and allocation type."
+        f"or set warp.config.launch_verification_mode = warp.config.LaunchVerificationMode.RELAXED "
+        f"only if this launch is valid for the hardware and allocation type."
+    )
+
+
+def _validate_launch_array_access(kernel, arg_name: str, value: warp.array, device: Device) -> None:
+    mode = warp.config.launch_verification_mode
+
+    if value.device == device:
+        return
+
+    if mode == warp.config.LaunchVerificationMode.STRICT:
+        _raise_launch_array_access_error(kernel, arg_name, value, device)
+
+    if mode == warp.config.LaunchVerificationMode.CHECKED:
+        if not _is_array_accessible_from_device(value, device):
+            _raise_launch_array_access_error(kernel, arg_name, value, device)
+        return
+
+    raise ValueError(
+        f"warp.config.launch_verification_mode must be a warp.config.LaunchVerificationMode value, got {mode!r}"
     )
 
 
@@ -7954,18 +7973,10 @@ def pack_arg(kernel, arg_type, arg_name, value, device, adjoint=False):
                     f"Error launching kernel '{kernel.key}', {adj}argument '{arg_name}' expects an array with {arg_type.ndim} dimension(s) but the passed array has {value.ndim} dimension(s)."
                 )
 
-            if device.is_cpu and value.device.is_cuda:
-                _raise_launch_array_access_error(kernel, arg_name, value, device)
-
             # Optional diagnostic check for mixed-device launches. By default, array pointers are passed
             # through and the hardware access rules determine whether the launch is valid.
-            if (
-                device.is_cuda
-                and warp.config.verify_launch_array_access
-                and value.device != device
-                and not _is_array_accessible_from_device(value, device)
-            ):
-                _raise_launch_array_access_error(kernel, arg_name, value, device)
+            if warp.config.launch_verification_mode != warp.config.LaunchVerificationMode.RELAXED:
+                _validate_launch_array_access(kernel, arg_name, value, device)
 
             return value.__ctype__()
 
