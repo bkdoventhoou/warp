@@ -161,7 +161,7 @@ def test_graph_launch_verification_mode_checked_cuda_capture(test, device):
     wp.load_module(device=device)
 
     launch_verification_mode_saved = wp.config.launch_verification_mode
-    wp.config.launch_verification_mode = wp.config.LaunchVerificationMode.CHECKED
+    wp.config.launch_verification_mode = wp.LaunchVerificationMode.CHECKED
     try:
         with wp.ScopedCapture(device=device, force_module_load=False) as capture:
             wp.launch(scale_kernel, dim=n, inputs=[input_arr, output_arr, 2.0], device=device)
@@ -193,7 +193,7 @@ def test_graph_launch_verification_mode_checked_peer_access_cuda_capture(test, _
         wp.set_peer_access_enabled(target_device, peer_device, True)
         test.assertTrue(wp.is_peer_access_enabled(target_device, peer_device))
 
-        wp.config.launch_verification_mode = wp.config.LaunchVerificationMode.CHECKED
+        wp.config.launch_verification_mode = wp.LaunchVerificationMode.CHECKED
         # The peer graph reads input_arr from target_device; wait for its H2D initialization.
         wp.synchronize_device(target_device)
         with wp.ScopedCapture(device=peer_device, force_module_load=False) as capture:
@@ -227,7 +227,7 @@ def test_graph_launch_verification_mode_checked_mempool_access_cuda_capture(test
         wp.set_mempool_access_enabled(target_device, peer_device, True)
         test.assertTrue(wp.is_mempool_access_enabled(target_device, peer_device))
 
-        wp.config.launch_verification_mode = wp.config.LaunchVerificationMode.CHECKED
+        wp.config.launch_verification_mode = wp.LaunchVerificationMode.CHECKED
         # The peer graph reads input_arr from target_device; wait for its H2D initialization.
         wp.synchronize_device(target_device)
         with wp.ScopedCapture(device=peer_device, force_module_load=False) as capture:

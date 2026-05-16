@@ -7866,7 +7866,7 @@ def _raise_launch_array_access_error(kernel, arg_name: str, value: warp.array, d
         f"but input array for argument '{arg_name}' is on device={value.device}, "
         f"whose array allocation is not accessible or cannot be verified as accessible from "
         f"'{device}'. Move the array to '{device}', enable the required peer/coherent access, "
-        f"or set warp.config.launch_verification_mode = warp.config.LaunchVerificationMode.RELAXED "
+        f"or set warp.config.launch_verification_mode = warp.LaunchVerificationMode.RELAXED "
         f"only if this launch is valid for the hardware and allocation type."
     )
 
@@ -7885,9 +7885,7 @@ def _validate_launch_array_access(kernel, arg_name: str, value: warp.array, devi
             _raise_launch_array_access_error(kernel, arg_name, value, device)
         return
 
-    raise ValueError(
-        f"warp.config.launch_verification_mode must be a warp.config.LaunchVerificationMode value, got {mode!r}"
-    )
+    raise ValueError(f"warp.config.launch_verification_mode must be a warp.LaunchVerificationMode value, got {mode!r}")
 
 
 def event_from_ipc_handle(handle, device: DeviceLike = None) -> Event:
@@ -8001,7 +7999,7 @@ def pack_arg(kernel, arg_type, arg_name, value, device, adjoint=False):
 
             # Optional diagnostic check for mixed-device launches. By default, array pointers are passed
             # through and the hardware access rules determine whether the launch is valid.
-            if warp.config.launch_verification_mode != warp.config.LaunchVerificationMode.RELAXED:
+            if warp.config.launch_verification_mode != warp.LaunchVerificationMode.RELAXED:
                 _validate_launch_array_access(kernel, arg_name, value, device)
 
             return value.__ctype__()

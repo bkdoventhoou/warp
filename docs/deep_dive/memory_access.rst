@@ -235,7 +235,7 @@ If you want a clear Python error before the kernel runs, set
 
 .. code:: python
 
-    wp.config.launch_verification_mode = wp.config.LaunchVerificationMode.CHECKED
+    wp.config.launch_verification_mode = wp.LaunchVerificationMode.CHECKED
 
 ``LaunchVerificationMode.RELAXED`` is the default and performs no pre-launch
 array access checks. Warp passes pointers through after type, dtype, and
@@ -273,7 +273,7 @@ launch device can legally access the pointer.
 .. code:: python
 
     with wp.ScopedDevice("cuda:0"):
-        wp.config.launch_verification_mode = wp.config.LaunchVerificationMode.CHECKED
+        wp.config.launch_verification_mode = wp.LaunchVerificationMode.CHECKED
         wp.launch(kernel, dim=a.size, inputs=[a])
 
 :attr:`warp.config.launch_verification_mode` can add launch overhead in
@@ -385,7 +385,7 @@ allocation or access pattern to create:
   the concrete array with :func:`wp.can_access(device, array) <warp.can_access>`.
 - Debugging mixed-device launch failures: temporarily set
   :attr:`warp.config.launch_verification_mode` to
-  ``wp.config.LaunchVerificationMode.CHECKED``.
+  ``wp.LaunchVerificationMode.CHECKED``.
 
 Prefer capability checks over platform-name checks. They make code portable
 across discrete GPUs, HMM-enabled systems, Jetson, Grace, and future coherent

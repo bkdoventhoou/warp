@@ -262,6 +262,8 @@ Runtime
    is_cuda_available
    print_diagnostics
 
+- :obj:`LaunchVerificationMode <warp.config.LaunchVerificationMode>`
+
 Kernel Programming
 ------------------
 

@@ -188,7 +188,7 @@ This means the implementation must query capabilities independently instead of a
 
 | ID  | Requirement | Priority | Notes |
 | --- | --- | --- | --- |
-| R1 | `wp.launch()` must default to passing cross-device array arguments through to the hardware | Must | Exposed as `wp.config.launch_verification_mode = LaunchVerificationMode.RELAXED` |
+| R1 | `wp.launch()` must default to passing cross-device array arguments through to the hardware | Must | Exposed as `wp.config.launch_verification_mode = wp.LaunchVerificationMode.RELAXED` |
 | R2 | Provide launch verification modes (`warp.config.launch_verification_mode`) for strict same-device checks and allocation-aware diagnostics | Must | Debuggability for users who hit CUDA illegal memory access errors; compatible with CUDA graph capture |
 | R3 | Provide `wp.can_access(device, array)` for allocation-aware array access checks | Must | Resource-oriented public API; Phase 1 supports Warp arrays only |
 | R4 | Provide `wp.prefetch()` API for explicit data migration hints | Should | Performance optimization for HMM / host-page-table ATS |
@@ -258,7 +258,7 @@ Each phase introduces only the device attributes, native functions, and Python A
 
 **Goal:** Replace the unconditional per-argument device check in `wp.launch()` with an explicit launch verification mode. The default `LaunchVerificationMode.RELAXED` passes cross-device array arguments straight through to the hardware. On systems with unified system-memory access (HMM or host-page-table ATS), this means GPU kernels can directly consume CPU arrays with zero launch overhead and zero friction. On systems where the access is illegal, the CUDA runtime or host process produces the error. `LaunchVerificationMode.STRICT` restores the original same-device rule, and `LaunchVerificationMode.CHECKED` provides allocation-aware diagnostics before the kernel runs, including during CUDA graph capture.
 
-This phase delivers six things: (a) query three new device attributes, (b) redesign `Device.can_access()` as a conservative device-level/default-allocation query, (c) add `wp.can_access(device, array)` as a public allocation-aware resource query for Warp arrays, (d) replace the unconditional `pack_arg()` same-device check with an explicit launch verification policy, (e) add `warp.config.LaunchVerificationMode` and `warp.config.launch_verification_mode` with allocation-aware verification for Warp-owned arrays where Warp can identify the allocator, including pinned CPU arrays on CUDA devices with UVA, and (f) add tests and advanced user documentation for the CPU/GPU memory access model.
+This phase delivers six things: (a) query three new device attributes, (b) redesign `Device.can_access()` as a conservative device-level/default-allocation query, (c) add `wp.can_access(device, array)` as a public allocation-aware resource query for Warp arrays, (d) replace the unconditional `pack_arg()` same-device check with an explicit launch verification policy, (e) add `wp.LaunchVerificationMode` / `warp.config.launch_verification_mode` with allocation-aware verification for Warp-owned arrays where Warp can identify the allocator, including pinned CPU arrays on CUDA devices with UVA, and (f) add tests and advanced user documentation for the CPU/GPU memory access model.
 
 #### 1a. Query Device Attributes
 
@@ -521,7 +521,7 @@ if value.device != device:
 With a policy gate and helper call:
 
 ```python
-if warp.config.launch_verification_mode != warp.config.LaunchVerificationMode.RELAXED:
+if warp.config.launch_verification_mode != warp.LaunchVerificationMode.RELAXED:
     _validate_launch_array_access(kernel, arg_name, value, device)
 ```
 
@@ -545,16 +545,16 @@ def _validate_launch_array_access(kernel, arg_name, value, device):
     if value.device == device:
         return
 
-    if mode == warp.config.LaunchVerificationMode.STRICT:
+    if mode == warp.LaunchVerificationMode.STRICT:
         _raise_launch_array_access_error(kernel, arg_name, value, device)
 
-    if mode == warp.config.LaunchVerificationMode.CHECKED:
+    if mode == warp.LaunchVerificationMode.CHECKED:
         if not can_access(device, value):
             _raise_launch_array_access_error(kernel, arg_name, value, device)
         return
 
     raise ValueError(
-        "warp.config.launch_verification_mode must be a LaunchVerificationMode value"
+        "warp.config.launch_verification_mode must be a warp.LaunchVerificationMode value"
     )
 ```
 
@@ -600,10 +600,12 @@ Note: Strict and checked modes impact performance.
 """
 ```
 
+Re-export `LaunchVerificationMode` from the top-level `warp` package so callers can write `wp.LaunchVerificationMode.CHECKED` when assigning `wp.config.launch_verification_mode`.
+
 **When to use:** If a user on a discrete GPU (without HMM) accidentally passes a CPU array to a GPU kernel, the kernel will fault with `CUDA_ERROR_ILLEGAL_ADDRESS`. This error is asynchronous and can corrupt the CUDA context, requiring a process restart. The recommended workflow is:
 
 1. Observe the CUDA error.
-2. Set `warp.config.launch_verification_mode = warp.config.LaunchVerificationMode.CHECKED`.
+2. Set `warp.config.launch_verification_mode = warp.LaunchVerificationMode.CHECKED`.
 3. Re-run. The clear Python `RuntimeError` identifies which kernel and which argument caused the mismatch, before the kernel ever launches.
 4. Fix the code, then restore `LaunchVerificationMode.RELAXED` for the default fast path.
 
@@ -984,7 +986,7 @@ Add a test module `warp/tests/cuda/test_unified_memory.py` (registered in `warp/
 
 **Cross-device launch tests (hardware-dependent, skip on incapable systems):**
 - On systems where `cuda_device.is_cpu_memory_access_from_gpu_supported` is `True`: allocate a CPU array, launch a GPU kernel that reads and writes it, verify results match expected values.
-- On CUDA devices with `device.is_uva`: allocate pinned CPU arrays and verify GPU kernels can read from and write to them with `warp.config.launch_verification_mode = warp.config.LaunchVerificationMode.CHECKED`.
+- On CUDA devices with `device.is_uva`: allocate pinned CPU arrays and verify GPU kernels can read from and write to them with `warp.config.launch_verification_mode = warp.LaunchVerificationMode.CHECKED`.
 - Test with output arrays (not just inputs).
 - Test with multi-dimensional arrays with non-trivial strides.
 

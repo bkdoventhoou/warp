@@ -22,7 +22,7 @@ from warp.tests.unittest_utils import *
 
 
 @contextlib.contextmanager
-def launch_verification_mode(mode: wp.config.LaunchVerificationMode):
+def launch_verification_mode(mode: wp.LaunchVerificationMode):
     """Temporarily set launch array-access verification mode and restore the previous value."""
 
     old_value = wp.config.launch_verification_mode
@@ -70,16 +70,17 @@ def test_unified_memory_device_capabilities(test, device):
 def test_unified_memory_launch_verification_mode_config(test, device):
     """Launch verification mode is an enum-backed public config setting."""
 
-    test.assertEqual(int(wp.config.LaunchVerificationMode.STRICT), 0)
-    test.assertEqual(int(wp.config.LaunchVerificationMode.RELAXED), 1)
-    test.assertEqual(int(wp.config.LaunchVerificationMode.CHECKED), 2)
-    test.assertIs(wp.config.launch_verification_mode, wp.config.LaunchVerificationMode.RELAXED)
+    test.assertIs(wp.LaunchVerificationMode, wp.config.LaunchVerificationMode)
+    test.assertEqual(int(wp.LaunchVerificationMode.STRICT), 0)
+    test.assertEqual(int(wp.LaunchVerificationMode.RELAXED), 1)
+    test.assertEqual(int(wp.LaunchVerificationMode.CHECKED), 2)
+    test.assertIs(wp.config.launch_verification_mode, wp.LaunchVerificationMode.RELAXED)
     old_config_name = "verify_launch_" + "array_access"
     test.assertFalse(hasattr(wp.config, old_config_name))
 
     old_value = wp.config.launch_verification_mode
     try:
-        for mode in wp.config.LaunchVerificationMode:
+        for mode in wp.LaunchVerificationMode:
             wp.config.launch_verification_mode = mode
             test.assertIs(wp.config.launch_verification_mode, mode)
 
@@ -131,7 +132,7 @@ def test_unified_memory_record_cmd_skips_default_access_check(test, device):
     src = wp.array(np.arange(4, dtype=np.float32), dtype=wp.float32, device="cpu")
     dst = wp.empty(4, dtype=wp.float32, device=device)
 
-    with launch_verification_mode(wp.config.LaunchVerificationMode.RELAXED):
+    with launch_verification_mode(wp.LaunchVerificationMode.RELAXED):
         cmd = wp.launch(read_cpu_write_gpu, dim=src.size, inputs=[src], outputs=[dst], device=device, record_cmd=True)
 
     test.assertIsInstance(cmd, wp.Launch)
@@ -146,7 +147,7 @@ def test_unified_memory_verify_rejects_gpu_reading_cpu_when_unsupported(test, de
     src = wp.array(np.arange(4, dtype=np.float32), dtype=wp.float32, device="cpu")
     dst = wp.empty(4, dtype=wp.float32, device=device)
 
-    with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
+    with launch_verification_mode(wp.LaunchVerificationMode.CHECKED):
         with test.assertRaisesRegex(RuntimeError, "array allocation is not accessible or cannot be verified"):
             wp.launch(read_cpu_write_gpu, dim=src.size, inputs=[src], outputs=[dst], device=device, record_cmd=True)
 
@@ -157,7 +158,7 @@ def test_unified_memory_verify_rejects_cpu_reading_gpu_when_unsupported(test, de
     src = wp.array(np.arange(4, dtype=np.float32), dtype=wp.float32, device=device)
     dst = wp.empty(4, dtype=wp.float32, device="cpu")
 
-    with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
+    with launch_verification_mode(wp.LaunchVerificationMode.CHECKED):
         with test.assertRaisesRegex(RuntimeError, "array allocation is not accessible or cannot be verified"):
             wp.launch(read_gpu_write_cpu, dim=src.size, inputs=[src], outputs=[dst], device="cpu", record_cmd=True)
 
@@ -168,7 +169,7 @@ def test_unified_memory_relaxed_allows_cpu_launch_with_gpu_array(test, device):
     src = wp.array(np.arange(4, dtype=np.float32), dtype=wp.float32, device=device)
     dst = wp.empty(4, dtype=wp.float32, device="cpu")
 
-    with launch_verification_mode(wp.config.LaunchVerificationMode.RELAXED):
+    with launch_verification_mode(wp.LaunchVerificationMode.RELAXED):
         cmd = wp.launch(read_gpu_write_cpu, dim=src.size, inputs=[src], outputs=[dst], device="cpu", record_cmd=True)
 
     test.assertIsInstance(cmd, wp.Launch)
@@ -183,7 +184,7 @@ def test_unified_memory_strict_rejects_cuda_launch_with_pinned_cpu_array(test, d
     src = wp.array(np.arange(4, dtype=np.float32), dtype=wp.float32, device="cpu", pinned=True)
     dst = wp.empty(4, dtype=wp.float32, device=device)
 
-    with launch_verification_mode(wp.config.LaunchVerificationMode.STRICT):
+    with launch_verification_mode(wp.LaunchVerificationMode.STRICT):
         with test.assertRaisesRegex(RuntimeError, "is on device=cpu"):
             wp.launch(read_cpu_write_gpu, dim=src.size, inputs=[src], outputs=[dst], device=device, record_cmd=True)
 
@@ -198,7 +199,7 @@ def test_unified_memory_cuda_launch_reads_cpu_array_when_supported(test, device)
     src = wp.array(src_np, dtype=wp.float32, device="cpu")
     dst = wp.empty(src.size, dtype=wp.float32, device=device)
 
-    with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
+    with launch_verification_mode(wp.LaunchVerificationMode.CHECKED):
         wp.launch(read_cpu_write_gpu, dim=src.size, inputs=[src], outputs=[dst], device=device)
 
     np.testing.assert_allclose(dst.numpy(), src_np * 2.0)
@@ -212,7 +213,7 @@ def test_unified_memory_cuda_launch_writes_cpu_array_when_supported(test, device
 
     dst = wp.empty(8, dtype=wp.float32, device="cpu")
 
-    with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
+    with launch_verification_mode(wp.LaunchVerificationMode.CHECKED):
         wp.launch(write_output_array, dim=dst.size, outputs=[dst], device=device)
 
     # dst is CPU memory written by the GPU; CPU-backed .numpy() does not synchronize the launch.
@@ -232,7 +233,7 @@ def test_unified_memory_cuda_launch_reads_pinned_cpu_array_when_uva_supported(te
 
     test.assertTrue(src.pinned)
 
-    with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
+    with launch_verification_mode(wp.LaunchVerificationMode.CHECKED):
         wp.launch(read_cpu_write_gpu, dim=src.size, inputs=[src], outputs=[dst], device=device)
 
     np.testing.assert_allclose(dst.numpy(), src_np * 2.0)
@@ -248,7 +249,7 @@ def test_unified_memory_cuda_launch_writes_pinned_cpu_array_when_uva_supported(t
 
     test.assertTrue(dst.pinned)
 
-    with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
+    with launch_verification_mode(wp.LaunchVerificationMode.CHECKED):
         wp.launch(write_output_array, dim=dst.size, outputs=[dst], device=device)
 
     # dst is CPU memory written by the GPU; CPU-backed .numpy() does not synchronize the launch.
@@ -292,7 +293,7 @@ class TestUnifiedMemory(unittest.TestCase):
 
             wp.load_module(device=peer_device)
             wp.synchronize_device(target_device)
-            with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
+            with launch_verification_mode(wp.LaunchVerificationMode.CHECKED):
                 wp.launch(read_cpu_write_gpu, dim=n, inputs=[src], outputs=[dst], device=peer_device)
 
             np.testing.assert_allclose(dst.numpy(), np.arange(n, dtype=np.float32) * 2.0)
@@ -323,7 +324,7 @@ class TestUnifiedMemory(unittest.TestCase):
 
             wp.load_module(device=peer_device)
             wp.synchronize_device(target_device)
-            with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
+            with launch_verification_mode(wp.LaunchVerificationMode.CHECKED):
                 wp.launch(read_cpu_write_gpu, dim=n, inputs=[src], outputs=[dst], device=peer_device)
 
             np.testing.assert_allclose(dst.numpy(), np.arange(1, n + 1, dtype=np.float32) * 2.0)
@@ -380,7 +381,7 @@ class TestUnifiedMemory(unittest.TestCase):
 
             wp.load_module(device=peer_device)
             wp.synchronize_device(target_device)
-            with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
+            with launch_verification_mode(wp.LaunchVerificationMode.CHECKED):
                 wp.launch(read_cpu_write_gpu, dim=n, inputs=[src], outputs=[dst], device=peer_device)
 
             np.testing.assert_allclose(dst.numpy(), np.arange(n, dtype=np.float32) * 2.0)
@@ -413,7 +414,7 @@ class TestUnifiedMemory(unittest.TestCase):
 
             wp.load_module(device=peer_device)
             wp.synchronize_device(target_device)
-            with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
+            with launch_verification_mode(wp.LaunchVerificationMode.CHECKED):
                 wp.launch(read_cpu_write_gpu, dim=n, inputs=[src], outputs=[dst], device=peer_device)
 
             np.testing.assert_allclose(dst.numpy(), np.arange(1, n + 1, dtype=np.float32) * 2.0)
@@ -443,7 +444,7 @@ class TestUnifiedMemory(unittest.TestCase):
             self.assertEqual(type(src._allocator).__name__, "CudaMempoolAllocator")
             self.assertFalse(wp.can_access(peer_device, src))
 
-            with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
+            with launch_verification_mode(wp.LaunchVerificationMode.CHECKED):
                 with self.assertRaisesRegex(RuntimeError, "array allocation is not accessible or cannot be verified"):
                     wp.launch(
                         read_cpu_write_gpu, dim=n, inputs=[src], outputs=[dst], device=peer_device, record_cmd=True
