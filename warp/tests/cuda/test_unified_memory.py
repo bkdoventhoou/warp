@@ -91,22 +91,38 @@ def test_unified_memory_launch_verification_mode_config(test, device):
 
 
 def test_unified_memory_can_access(test, device):
-    """Device.can_access() reports conservative default-allocation reachability."""
+    """Device and array access queries report conservative reachability."""
 
     cpu = wp.get_device("cpu")
+    cpu_array = wp.empty(4, dtype=wp.float32, device=cpu)
 
     test.assertTrue(device.can_access(device))
     test.assertTrue(cpu.can_access(cpu))
+    test.assertTrue(wp.can_access(cpu, cpu_array))
+
+    with test.assertRaisesRegex(TypeError, "Warp arrays"):
+        wp.can_access(cpu, cpu)
 
     if device.is_cuda:
+        cuda_array = wp.empty(4, dtype=wp.float32, device=device)
+
         test.assertEqual(device.can_access(cpu), device.is_cpu_memory_access_from_gpu_supported)
         test.assertFalse(cpu.can_access(device))
+        test.assertEqual(wp.can_access(device, cpu_array), device.is_cpu_memory_access_from_gpu_supported)
+        test.assertFalse(wp.can_access(cpu, cuda_array))
+
+        if device.is_uva:
+            pinned_cpu_array = wp.empty(4, dtype=wp.float32, device=cpu, pinned=True)
+            test.assertTrue(wp.can_access(device, pinned_cpu_array))
 
         for other in wp.get_cuda_devices():
             if other == device:
                 test.assertTrue(device.can_access(other))
             else:
-                test.assertEqual(device.can_access(other), wp.is_peer_access_enabled(other, device))
+                if other.is_mempool_enabled:
+                    test.assertEqual(device.can_access(other), wp.is_mempool_access_enabled(other, device))
+                else:
+                    test.assertEqual(device.can_access(other), wp.is_peer_access_enabled(other, device))
 
 
 def test_unified_memory_record_cmd_skips_default_access_check(test, device):
@@ -272,6 +288,7 @@ class TestUnifiedMemory(unittest.TestCase):
                 dst = wp.empty(n, dtype=wp.float32, device=peer_device)
 
             self.assertEqual(type(src._allocator).__name__, "CudaDefaultAllocator")
+            self.assertTrue(wp.can_access(peer_device, src))
 
             wp.load_module(device=peer_device)
             wp.synchronize_device(target_device)
@@ -317,6 +334,31 @@ class TestUnifiedMemory(unittest.TestCase):
     @unittest.skipUnless(
         get_cuda_device_pair_with_mempool_access_support(), "Requires devices with mempool access support"
     )
+    def test_unified_memory_device_can_access_uses_mempool_state_when_target_mempools_enabled(self):
+        """Device.can_access() follows the target device's current built-in allocator mode."""
+
+        target_device, peer_device = get_cuda_device_pair_with_mempool_access_support()
+
+        peer_access_saved = wp.is_peer_access_enabled(target_device, peer_device)
+        mempool_access_saved = wp.is_mempool_access_enabled(target_device, peer_device)
+        try:
+            wp.set_peer_access_enabled(target_device, peer_device, True)
+            wp.set_mempool_access_enabled(target_device, peer_device, False)
+
+            with wp.ScopedMempool(target_device, True):
+                self.assertTrue(target_device.is_mempool_enabled)
+                self.assertFalse(peer_device.can_access(target_device))
+
+            with wp.ScopedMempool(target_device, False):
+                self.assertFalse(target_device.is_mempool_enabled)
+                self.assertTrue(peer_device.can_access(target_device))
+        finally:
+            wp.set_peer_access_enabled(target_device, peer_device, peer_access_saved)
+            wp.set_mempool_access_enabled(target_device, peer_device, mempool_access_saved)
+
+    @unittest.skipUnless(
+        get_cuda_device_pair_with_mempool_access_support(), "Requires devices with mempool access support"
+    )
     def test_unified_memory_verify_uses_mempool_access_for_cuda_mempool_allocations(self):
         """CUDA mempool allocations use mempool-access state for cross-GPU verification."""
 
@@ -334,6 +376,7 @@ class TestUnifiedMemory(unittest.TestCase):
             dst = wp.empty(n, dtype=wp.float32, device=peer_device)
 
             self.assertEqual(type(src._allocator).__name__, "CudaMempoolAllocator")
+            self.assertTrue(wp.can_access(peer_device, src))
 
             wp.load_module(device=peer_device)
             wp.synchronize_device(target_device)
@@ -398,6 +441,7 @@ class TestUnifiedMemory(unittest.TestCase):
             dst = wp.empty(n, dtype=wp.float32, device=peer_device)
 
             self.assertEqual(type(src._allocator).__name__, "CudaMempoolAllocator")
+            self.assertFalse(wp.can_access(peer_device, src))
 
             with launch_verification_mode(wp.config.LaunchVerificationMode.CHECKED):
                 with self.assertRaisesRegex(RuntimeError, "array allocation is not accessible or cannot be verified"):

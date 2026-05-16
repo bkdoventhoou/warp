@@ -4152,19 +4152,18 @@ class Device:
             self.runtime.core.wp_cuda_context_set_current(self.context)
 
     def can_access(self, other):
-        """Return whether this device can access standard Warp allocations on another device.
+        """Return whether this device can access the current built-in allocator for another device.
 
-        This is a conservative device-level query for default allocations. It does not inspect a specific allocation.
-        Use ``_is_array_accessible_from_device()`` when allocation-specific Warp array logic is needed, such as for
-        pinned CPU arrays or CUDA memory-pool allocations.
+        This is a coarse device-level query. It does not inspect a specific allocation, so it does not answer
+        whether an existing array can be accessed. Use :func:`warp.can_access` when allocation-specific Warp array
+        logic is needed, such as for pinned CPU arrays or CUDA memory-pool allocations.
         """
 
         # TODO: this function should be redesigned in terms of (device, resource).
         # - a device can access any resource on the same device
         # - a CUDA device can access CPU memory when the device supports it
-        # - a CUDA device can access default CUDA allocations on a peer device if peer access is enabled
-        # Allocation-specific checks, including CUDA memory-pool allocations, are handled by
-        # _is_array_accessible_from_device().
+        # - a CUDA device can access another CUDA device's current built-in allocator when its
+        #   corresponding access mode is enabled
         other = self.runtime.get_device(other)
 
         if self.context == other.context:
@@ -4178,6 +4177,8 @@ class Device:
             return False
 
         if self.is_cuda and other.is_cuda:
+            if other.is_mempool_enabled:
+                return is_mempool_access_enabled(other, self)
             return is_peer_access_enabled(other, self)
 
         return False
@@ -7802,6 +7803,31 @@ def _get_array_allocator(value: warp.array) -> Allocator | None:
     return None
 
 
+def can_access(device: DeviceLike, resource) -> bool:
+    """Return whether ``device`` can directly access ``resource``.
+
+    In this release, ``resource`` must be a Warp array. The query is allocation-aware for built-in Warp
+    allocators and returns ``False`` for cross-device allocations whose access rules cannot be verified.
+
+    Args:
+        device: The device that needs to access ``resource``.
+        resource: The resource to query. Only :class:`warp.array` is supported.
+
+    Returns:
+        ``True`` if Warp can verify that ``device`` can directly access ``resource``, otherwise ``False``.
+
+    Raises:
+        TypeError: If ``resource`` is not a Warp array.
+    """
+
+    device = runtime.get_device(device)
+
+    if warp._src.types.is_array(resource):
+        return _is_array_accessible_from_device(resource, device)
+
+    raise TypeError("wp.can_access() only supports Warp arrays in this release")
+
+
 def _is_array_accessible_from_device(value: warp.array, device: Device) -> bool:
     """Return whether ``device`` can directly access ``value`` as a kernel argument."""
 
@@ -7855,7 +7881,7 @@ def _validate_launch_array_access(kernel, arg_name: str, value: warp.array, devi
         _raise_launch_array_access_error(kernel, arg_name, value, device)
 
     if mode == warp.config.LaunchVerificationMode.CHECKED:
-        if not _is_array_accessible_from_device(value, device):
+        if not can_access(device, value):
             _raise_launch_array_access_error(kernel, arg_name, value, device)
         return
 

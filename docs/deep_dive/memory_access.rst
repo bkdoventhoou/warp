@@ -160,11 +160,44 @@ Do not assume that GPU access to CPU memory implies CPU access to GPU-resident
 memory. Some systems support the former but not the latter.
 
 
+Using ``wp.can_access()``
+-------------------------
+
+The function :func:`warp.can_access` answers whether code running on one device
+can directly access a specific Warp array:
+
+.. code:: python
+
+    launch_device = wp.get_device("cuda:0")
+    data = wp.empty(1024, dtype=float, device="cpu")
+
+    if wp.can_access(launch_device, data):
+        ...
+
+For CPU arrays passed to CUDA kernels, pinned CPU arrays are accepted on CUDA
+devices with unified virtual addressing, and ordinary CPU arrays require
+``is_cpu_memory_access_from_gpu_supported``. For CUDA arrays, default CUDA
+allocations use CUDA peer-access state, while memory pool allocations use
+memory-pool access state. See :ref:`mempool_access` for the distinction between
+peer access for default CUDA allocations and memory-pool access for mempool
+allocations.
+
+``wp.can_access(device, array)`` returns ``False`` when Warp cannot verify that
+the array is directly accessible. This includes cross-device arrays backed by
+custom allocators or externally wrapped allocations whose allocation kind is not
+known to Warp. A ``False`` result means "not verified accessible"; it does not
+prove that the hardware could never access the pointer.
+
+``wp.can_access()`` is a resource-oriented API. In this release, the second
+argument must be a Warp array. Passing another device as the second argument is
+not supported.
+
+
 Using ``Device.can_access()``
 ------------------------------
 
-The method :meth:`Device.can_access` answers whether code running on one device
-can access standard Warp allocations associated with another device:
+The method :meth:`Device.can_access` is a coarse device-level query for cases
+where no concrete array is available:
 
 .. code:: python
 
@@ -178,20 +211,14 @@ For GPU kernels accessing CPU arrays, this method uses
 ``is_cpu_memory_access_from_gpu_supported`` because standard Warp CPU arrays use
 ordinary CPU memory. For CPU code accessing CUDA arrays, it returns ``False`` for
 Warp CUDA arrays because the built-in CUDA allocators do not create CUDA
-managed-memory allocations. For GPU/GPU pairs, it reflects CUDA peer access state
-for default CUDA allocations. See :ref:`mempool_access` for the distinction
-between peer access for default CUDA allocations and memory-pool access for
-mempool allocations.
+managed-memory allocations. For GPU/GPU pairs, it reflects the target device's
+current built-in allocator mode: memory-pool access when memory pools are
+enabled on the target device, and peer access otherwise.
 
-``Device.can_access()`` is a conservative device-level query, not a guarantee
-that every possible allocation for the other device is accessible. It does not
-inspect a specific array allocation, so it does not report pinned CPU arrays
-separately from ordinary CPU arrays, and it does not use
-``is_gpu_memory_access_from_cpu_supported`` to accept standard Warp CUDA arrays
-as CPU-accessible. Launch verification, described below, uses an internal
-array-aware check for Warp array arguments. When a cross-device Warp array uses
-an allocation whose accessibility Warp cannot verify, launch verification fails
-closed instead of assuming the pointer is safe to use.
+``Device.can_access()`` is not authoritative for existing arrays. An array may
+have been allocated before memory-pool settings changed, may use a custom
+allocator, or may wrap external memory. Code that has an actual array should use
+``wp.can_access(device, array)`` instead.
 
 
 .. _launch_verification:
@@ -218,11 +245,8 @@ dimension validation.
 rejects every cross-device Warp array argument before launch.
 
 ``LaunchVerificationMode.CHECKED`` checks each cross-device Warp array argument
-against the launch device. For CPU arrays passed to CUDA kernels, pinned CPU
-arrays are accepted on CUDA devices with unified virtual addressing, and
-ordinary CPU arrays require ``is_cpu_memory_access_from_gpu_supported``. For CUDA
-arrays, default CUDA allocations use CUDA peer-access state, while memory pool
-allocations use memory-pool access state.
+against the launch device using the same array-access predicate as
+``wp.can_access(device, array)``.
 
 If the launch device cannot access the array allocation, or if Warp cannot
 verify a cross-device Warp array allocation, ``LaunchVerificationMode.CHECKED``

@@ -62,8 +62,10 @@ def test_devices_can_access_self(test, device):
             test.assertNotEqual(device, warp_device)
             test.assertNotEqual(device, device_str)
         elif device.is_cuda and warp_device.is_cuda and device != warp_device:
-            # is_peer_access_enabled(target, peer) checks whether peer can access target.
-            test.assertEqual(device.can_access(warp_device), wp.is_peer_access_enabled(warp_device, device))
+            if warp_device.is_mempool_enabled:
+                test.assertEqual(device.can_access(warp_device), wp.is_mempool_access_enabled(warp_device, device))
+            else:
+                test.assertEqual(device.can_access(warp_device), wp.is_peer_access_enabled(warp_device, device))
 
 
 def test_devices_sm_count(test, device):

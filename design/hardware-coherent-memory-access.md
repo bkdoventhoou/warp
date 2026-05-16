@@ -401,8 +401,8 @@ def can_access(self, other):
     # TODO: this function should be redesigned in terms of (device, resource).
     # - a device can access any resource on the same device
     # - a CUDA device can access CPU memory when the device supports it
-    # - a CUDA device can access regular CUDA allocations on a peer device if peer access is enabled
-    # - a CUDA device can access mempool allocations on a peer device if mempool access is enabled
+    # - a CUDA device can access another CUDA device's current built-in allocator when its
+    #   corresponding access mode is enabled
     other = self.runtime.get_device(other)
 
     if self.context == other.context:
@@ -416,6 +416,8 @@ def can_access(self, other):
         return False
 
     if self.is_cuda and other.is_cuda:
+        if other.is_mempool_enabled:
+            return is_mempool_access_enabled(other, self)
         return is_peer_access_enabled(other, self)
 
     return False
@@ -423,10 +425,11 @@ def can_access(self, other):
 
 **Notes on `can_access()` implementation details:**
 
-- The `is_peer_access_enabled()` call in the GPU-to-GPU branch is the module-level function in `warp/_src/context.py`. It lives in the same module as `Device`, so no additional import is needed.
+- The `is_peer_access_enabled()` and `is_mempool_access_enabled()` calls in the GPU-to-GPU branch are module-level functions in `warp/_src/context.py`. They live in the same module as `Device`, so no additional imports are needed.
 - The `self.context == other.context` check catches same-device access and same-context aliases. It also covers CPU-to-CPU access because the CPU device has no CUDA context.
-- The TODO in the existing code mentions that access depends on the _resource_ (allocation type), not just the device pair. `Device.can_access()` remains a conservative device-level check: it returns `True` only when standard/default allocations on the other device are accessible. This avoids turning a device-only API into an allocation-specific oracle.
-- `Device.can_access()` is NOT called in the default launch path. It is invoked by APIs and user code that need the device-level/default-allocation answer. The launch verification path uses the same private array-aware helper exposed through top-level `wp.can_access(device, array)` so CUDA default allocations and CUDA memory-pool allocations can be checked against the correct access state.
+- The TODO in the existing code mentions that access depends on the _resource_ (allocation type), not just the device pair. `Device.can_access()` remains a coarse device-level check: it answers whether `self` can access allocations made on `other` by Warp's current built-in allocator choice at query time. For CUDA devices, that means memory-pool access when `other.is_mempool_enabled` is true, and peer access otherwise.
+- `Device.can_access()` is not an authoritative predicate for an existing array. An array may have been allocated before mempool settings changed, may use a custom allocator, or may wrap external memory. Any code with an actual array should use `wp.can_access(device, array)` instead.
+- `Device.can_access()` is NOT called in the default launch path. It is invoked by APIs and user code that need the coarse device-level/current-default-allocation answer. The launch verification path uses `wp.can_access(device, array)` so CUDA default allocations and CUDA memory-pool allocations can be checked against the array's actual allocator.
 
 #### 1c. Add Top-Level `wp.can_access(device, array)`
 
@@ -458,6 +461,8 @@ def can_access(device: DeviceLike, resource) -> bool:
 `False` therefore means "Warp cannot verify that this resource is directly accessible", not necessarily "the hardware could never access this pointer." Advanced users may still use `LaunchVerificationMode.RELAXED` to pass pointers through when they know the allocation is valid for the launch device.
 
 The API intentionally does not support `wp.can_access(device, device)`. Device-level/default-allocation queries remain available as `Device.can_access(other_device)`. Keeping the top-level API resource-oriented leaves room to add `wp.can_access(device, hash_grid)` and `wp.can_access(device, mesh)` later without overloading it as another device-pair predicate.
+
+Any internal or public path that has a concrete array should prefer `wp.can_access(device, array)` over `Device.can_access(array.device)`. This includes `LaunchVerificationMode.CHECKED` and the future `wp.copy()` staging optimization. `Device.can_access()` is useful only when no concrete resource is available and the caller accepts a coarse answer for the target device's current built-in allocation mode.
 
 Implementation uses the same private helper that powers `LaunchVerificationMode.CHECKED`, following Warp array views to their owner allocation where possible:
 
@@ -529,7 +534,7 @@ if value.device != device:
     _raise_launch_array_access_error(kernel, arg_name, value, device)
 ```
 
-`LaunchVerificationMode.CHECKED` checks the actual Warp array allocation where Warp can determine it, using the same `_is_array_accessible_from_device()` helper as `wp.can_access(device, array)`.
+`LaunchVerificationMode.CHECKED` checks the actual Warp array allocation where Warp can determine it, using `wp.can_access(device, value)`.
 
 The policy helper is responsible for mode validation:
 
@@ -544,7 +549,7 @@ def _validate_launch_array_access(kernel, arg_name, value, device):
         _raise_launch_array_access_error(kernel, arg_name, value, device)
 
     if mode == warp.config.LaunchVerificationMode.CHECKED:
-        if not _is_array_accessible_from_device(value, device):
+        if not can_access(device, value):
             _raise_launch_array_access_error(kernel, arg_name, value, device)
         return
 
@@ -610,7 +615,7 @@ Add `docs/deep_dive/memory_access.rst` and link it from the docs index and devic
 
 - The three public `Device` properties and that they are `False` for CPU devices.
 - How to guard mixed CPU/GPU launches using the capability properties.
-- How `Device.can_access()` relates to CPU/GPU capability properties and GPU/GPU peer access.
+- How `Device.can_access()` relates to CPU/GPU capability properties, GPU/GPU peer access, and GPU/GPU memory-pool access.
 - How `wp.can_access(device, array)` checks a specific Warp array allocation, why it fails closed for unknown/custom CUDA allocations, and why `wp.can_access(device, device)` is not supported.
 - How launch verification uses the same allocation-aware predicate as `wp.can_access(device, array)`.
 - How and when to use `wp.config.launch_verification_mode`, including its CUDA graph capture compatibility.
@@ -966,7 +971,8 @@ Add a test module `warp/tests/cuda/test_unified_memory.py` (registered in `warp/
 - GPU-to-CPU and CPU-to-GPU: assert the result is consistent with Warp default allocation rules:
   - If `is_cpu_memory_access_from_gpu_supported` is `True`, GPU-to-CPU should be `True`.
   - CPU-to-GPU should be `False` for Warp default CUDA arrays, even if managed-memory host access is supported.
-- GPU-to-GPU peer: enable peer access, verify `can_access()` returns `True`. Disable, verify `False`.
+- GPU-to-GPU: when the target device has mempools disabled, verify `can_access()` follows `wp.is_peer_access_enabled(target, peer)`. When the target device has mempools enabled, verify it follows `wp.is_mempool_access_enabled(target, peer)`.
+- On multi-GPU systems, verify that enabling peer access alone does not make `Device.can_access()` return `True` for a target device whose current built-in allocator is the CUDA mempool.
 
 **`wp.can_access(device, array)` tests (run on all hardware):**
 - Same-device arrays return `True`.
