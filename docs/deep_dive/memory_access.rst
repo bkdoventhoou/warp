@@ -365,7 +365,10 @@ Practical Guidance
 ------------------
 
 Use the same-device pattern unless you need zero-copy CPU/GPU sharing. When you
-do need zero-copy sharing, query the specific direction your algorithm requires:
+already have an array, use :func:`wp.can_access(device, array) <warp.can_access>`
+to decide whether a specific launch device can directly access that allocation.
+Capability flags are most useful before allocation, when deciding what kind of
+allocation or access pattern to create:
 
 - GPU kernel reads or writes ordinary CPU arrays: check
   ``device.is_cpu_memory_access_from_gpu_supported``.
@@ -378,7 +381,8 @@ do need zero-copy sharing, query the specific direction your algorithm requires:
   accessible from both processors, and check
   ``device.is_cpu_gpu_atomic_supported``.
 - GPU kernels use arrays from another GPU: enable peer access for default CUDA
-  allocations, or memory-pool access for CUDA memory-pool allocations.
+  allocations, or memory-pool access for CUDA memory-pool allocations, then check
+  the concrete array with :func:`wp.can_access(device, array) <warp.can_access>`.
 - Debugging mixed-device launch failures: temporarily set
   :attr:`warp.config.launch_verification_mode` to
   ``wp.config.LaunchVerificationMode.CHECKED``.
